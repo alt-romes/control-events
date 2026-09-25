@@ -7,7 +7,7 @@
   {
 
     options = {
-      control-node = {
+      services.control-node = {
         enable = lib.mkEnableOption "Enable a control-node on this machine, which listens for control-events";
         proxyTo = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
@@ -43,7 +43,7 @@
     };
 
     config =
-    let cfg = config.control-node;
+    let cfg = config.services.control-node;
      in lib.mkIf cfg.enable {
       services.mosquitto = {
         enable = true;
