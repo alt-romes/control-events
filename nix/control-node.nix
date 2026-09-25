@@ -30,6 +30,13 @@
             rather than any TLS or password based authentication to the node.
             '';
         };
+        nodeId = {
+          type = lib.types.str;
+          description = ''
+            String node identifier which must be unique across nodes
+            proxying to the same target node
+            '';
+        };
       };
     };
 
@@ -60,8 +67,17 @@
           [simpl_listen cfg.listenOn]; # should be a private ip
 
         # Bridges specify how to connect multiple MQTT brokers together
-        bridges."proxy_to" = {
-          addresses = [{ address = cfg.proxyTo; }];
+        # In our case, we always proxy topics out
+        bridges = lib.mkIf (cfg.proxyTo != null) {
+          "proxy_to" = {
+            addresses = [{ address = cfg.proxyTo; }];
+            topics = [ "# out 2" ];
+            settings = {
+              cleansession = false;
+              remote_clientid = cfg.nodeId;
+              bridge_protocol_version = "mqttv50";
+            };
+          };
         };
 
         # Persist messages
@@ -74,7 +90,7 @@
                                     # but only on private addr in `listenOn`
                                     # (1883 is the default port)
       };
-    }; 
+    };
 
   };
 }
