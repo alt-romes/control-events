@@ -1,14 +1,14 @@
 { self, ... }:
 {
-  flake.darwinModules.control-node = { config, lib, pkgs, ... }:
+  flake.darwinModules.control-events = { config, lib, pkgs, ... }:
   {};
 
-  flake.nixosModules.control-node = { config, lib, pkgs, ... }:
+  flake.nixosModules.control-events = { config, lib, pkgs, ... }:
   {
 
     options = {
-      services.control-node = {
-        enable = lib.mkEnableOption "a control-node on this machine, which listens for control-events";
+      services.control-events-node = {
+        enable = lib.mkEnableOption "a control-events-node on this machine, which listens for control-events";
         proxyTo = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
@@ -44,7 +44,7 @@
     };
 
     config =
-    let cfg = config.services.control-node;
+    let cfg = config.services.control-events-node;
      in lib.mkIf cfg.enable {
 
       services.mosquitto = {
