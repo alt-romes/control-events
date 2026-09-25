@@ -8,7 +8,7 @@
 
     options = {
       services.control-node = {
-        enable = lib.mkEnableOption "Enable a control-node on this machine, which listens for control-events";
+        enable = lib.mkEnableOption "a control-node on this machine, which listens for control-events";
         proxyTo = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
@@ -45,6 +45,7 @@
     config =
     let cfg = config.services.control-node;
      in lib.mkIf cfg.enable {
+
       services.mosquitto = {
         enable = true;
 
@@ -87,13 +88,12 @@
       };
 
       networking.firewall = lib.mkIf (cfg.listenOn != null) {
-        enable = true;
-        allowedTCPPorts = [ 1883 ]; # node is accessible from other machines,
-                                    # but mosquitto should only be bound on
-                                    # private addr in `listenOn`
-                                    # (1883 is the default port)
+        # node is accessible from other machines, but mosquitto should only be
+        # bound on private addr in `listenOn` (1883 is the default port)
+        allowedTCPPorts = [ 1883 ];
       };
-    };
+
+     };
 
   };
 }

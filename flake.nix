@@ -1,4 +1,3 @@
-{ ... }:
 {
   description = "Distributed control-events";
 
@@ -7,8 +6,7 @@
     flake-parts.url  = "github:hercules-ci/flake-parts";
     import-tree.url  = "github:vic/import-tree";
 
-    flake-parts.inputs.nixpkgs.follows = "nixpkgs";
-    import-tree.inputs.nixpkgs.follows = "nixpkgs";
+    flake-parts.inputs.nixpkgs-lib.follows = "nixpkgs";
   };
 
   outputs = inputs: inputs.flake-parts.lib.mkFlake { inherit inputs; }
