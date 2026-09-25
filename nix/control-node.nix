@@ -70,12 +70,28 @@ in
         mkdir -p ${mosquitto.dataDir}
       '';
 
+      # mosquitto drops privileges to this user on launch
+      # (its built-in `user` option defaults to "mosquitto")
+      users.knownUsers = [ "mosquitto" ];
+      users.knownGroups = [ "mosquitto" ];
+      users.users.mosquitto = {
+        uid = 4435;
+        gid = 4435;
+        home = mosquitto.dataDir; # the daemon makes sure this is owned by mosquitto
+        description = "Mosquitto MQTT Broker user";
+        isHidden = true;
+      };
+      users.groups.mosquitto.gid = 4435;
+
       launchd.daemons.mosquitto = {
         # Execute the exact same shell preStart and ExecStart commands as a
         # nixos system, but the pkgs referenced will be darwin pkgs!
         script = ''
           export PATH=${pkgs.coreutils}/bin:$PATH # for `install`
           ${mosquitto_unit.preStart}
+          # preStart runs as root, but mosquitto (service) drops
+          # privileges to the mosquitto (user)
+          chown -R mosquitto:mosquitto ${mosquitto.dataDir}
           exec ${mosquitto_unit.serviceConfig.ExecStart}
         '';
         serviceConfig = {
