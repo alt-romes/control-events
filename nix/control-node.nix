@@ -65,12 +65,16 @@ in
   {
     imports = [ nodeOptions ];
     config = lib.mkIf cfg.enable {
+      # launchd chdirs into WorkingDirectory, so it must already exist
+      system.activationScripts.preActivation.text = ''
+        mkdir -p ${mosquitto.dataDir}
+      '';
+
       launchd.daemons.mosquitto = {
         # Execute the exact same shell preStart and ExecStart commands as a
         # nixos system, but the pkgs referenced will be darwin pkgs!
         script = ''
           export PATH=${pkgs.coreutils}/bin:$PATH # for `install`
-          mkdir -p ${mosquitto.dataDir}
           ${mosquitto_unit.preStart}
           exec ${mosquitto_unit.serviceConfig.ExecStart}
         '';
