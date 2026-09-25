@@ -33,10 +33,11 @@
             '';
         };
         nodeId = lib.mkOption {
-          type = lib.types.str;
+          type = lib.types.nullOr lib.types.str;
+          default = null;
           description = ''
             String node identifier which must be unique across nodes
-            proxying to the same target node
+            proxying to the same target. Required if proxyTo is not null.
             '';
         };
       };
