@@ -9,8 +9,9 @@
     options = {
       control-node = {
         enable = lib.mkEnableOption "Enable a control-node on this machine, which listens for control-events";
-        proxyTo = {
-          type = lib.nullOr lib.types.str;
+        proxyTo = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
           description = ''
             The server host to which events in this node are proxied
             to. The target node will typically aggregate events from various
@@ -19,8 +20,9 @@
             the potentially remote target is unavailable).
             '';
         };
-        listenOn = {
-          type = lib.nullOr lib.types.str;
+        listenOn = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
           description = ''
             If events are meant to be proxied to this node from other nodes,
             what address to bind the node on. "null" otherwise.
@@ -30,7 +32,7 @@
             rather than any TLS or password based authentication to the node.
             '';
         };
-        nodeId = {
+        nodeId = lib.mkOption {
           type = lib.types.str;
           description = ''
             String node identifier which must be unique across nodes
@@ -41,8 +43,8 @@
     };
 
     config =
-    let cfg = cfg.control-node;
-     in {
+    let cfg = config.control-node;
+     in lib.mkIf cfg.enable {
       services.mosquitto = {
         enable = true;
 
@@ -53,7 +55,7 @@
         # (virtual) private net for security
         listeners =
         let
-          simpl_listen = { addr }:
+          simpl_listen = addr:
           {
             address = addr;
             acl = [ "pattern readwrite #" ];
@@ -61,10 +63,10 @@
             settings.allow_anonymous = true;
           };
         in
-        [simpl_listen "127.0.0.1"]     # localhost
+        [ (simpl_listen "127.0.0.1") ] # localhost
         ++
-        lib.mkIf (cfg.listenOn != null)
-          [simpl_listen cfg.listenOn]; # should be a private ip
+        lib.optional (cfg.listenOn != null)
+          (simpl_listen cfg.listenOn); # should be a private ip
 
         # Bridges specify how to connect multiple MQTT brokers together
         # In our case, we always proxy topics out
@@ -84,10 +86,11 @@
         persistence = true;
       };
 
-      networking.firewall = lib.mkIf (config.control-node.listenOn) {
+      networking.firewall = lib.mkIf (cfg.listenOn != null) {
         enable = true;
         allowedTCPPorts = [ 1883 ]; # node is accessible from other machines,
-                                    # but only on private addr in `listenOn`
+                                    # but mosquitto should only be bound on
+                                    # private addr in `listenOn`
                                     # (1883 is the default port)
       };
     };
