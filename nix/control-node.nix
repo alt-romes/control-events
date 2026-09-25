@@ -141,6 +141,7 @@ in
       networking.firewall = lib.mkIf (cfg.listenOn != null) {
         # node is accessible from other machines, but mosquitto should only be
         # bound on private addr in `listenOn` (1883 is the default port)
+        # WARNING: If you add a listener above with a public IP, anyone can use the broker.
         allowedTCPPorts = [ 1883 ];
       };
 
