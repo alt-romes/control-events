@@ -44,10 +44,11 @@ data Conn = Conn MQTTClient Topic
 
 -- | Open a connection to the broker for this service to send events.
 -- The 'Topic' argument is used as the base topic for events sent within this
--- connection, so it should represent the service rather than any particular
--- task.
+-- connection, so it should represent the service or type rather than any
+-- particular task.
 withConn :: Topic -- ^ Service topic, e.g. @'server' <> "kanjideck-fulfillment"@
                   --                    or @'script' <> "finances" <> "mercurybank-hs"@
+                  --                    or perhaps even just @'script'@.
          -> (Conn -> IO r)
          -> IO r
 withConn serviceTopic = bracket connectBroker disconnectBroker where
@@ -77,7 +78,7 @@ withConn serviceTopic = bracket connectBroker disconnectBroker where
 --------------------------------------------------------------------------------
 
 -- | An identifier to correlate scoped events and start/stop events
-newtype EventId = EventId { correlationId :: LBS.ByteString }
+data EventId = EventId { correlationId :: LBS.ByteString, evtTopic :: Topic }
 
 data EvtMeta = EvtMeta
   { scope   :: Maybe EventId
@@ -108,8 +109,12 @@ failed msg r = (EvtDone msg False, r)
 
 -- | Send a delimited "transactional" event
 event :: Conn -> EvtMeta -> Topic -> (EventId -> IO (EvtDone, r)) -> IO r
-event (Conn mc base) emt topic k
-  = bracket startEvent endEvent (\(ev, ref) -> k ev >>= \(edn, r) -> r <$ writeIORef ref (Just edn)) where
+event (Conn mc conn_base) emt topic k
+  = bracket startEvent endEvent $ \(ev, ref) ->
+      k ev >>= \(edn, r) -> r <$ writeIORef ref (Just edn)
+  where
+  base_topic = maybe conn_base evtTopic emt.scope
+  full_topic = base_topic <> topic
 
   -- Always do a "transaction": explicit start evt before we do anything,
   -- followed by an end event when done. The start "acquire" is crucial to
@@ -118,13 +123,13 @@ event (Conn mc base) emt topic k
   startEvent = do
     correlationId <- UUID.toLazyASCIIBytes <$> UUID.nextRandom
     ref           <- newIORef Nothing
-    publishq mc (base <> topic <> "start") (JSON.encode emt) False{-retain-}
+    publishq mc (full_topic <> "start") (JSON.encode emt) False{-retain-}
              QoS2 [PropCorrelationData correlationId]
-    pure (EventId{correlationId}, ref)
+    pure (EventId{correlationId, evtTopic=full_topic}, ref)
 
   endEvent (EventId{correlationId}, ref) = do
     edn <- fromMaybe exception_done <$> readIORef ref
-    publishq mc (base <> topic <> "finished") (JSON.encode edn.summary) False{-retain-}
+    publishq mc (full_topic <> "finished") (JSON.encode edn.summary) False{-retain-}
              QoS2 [PropCorrelationData correlationId]
     where
       exception_done = EvtDone
@@ -133,6 +138,5 @@ event (Conn mc base) emt topic k
 
 --------------------------------------------------------------------------------
 
-instance ToJSON EventId   where toJSON    = String . T.decodeASCII . LBS.toStrict . coerce
-instance FromJSON EventId where parseJSON = withText "EventId" $ pure . coerce . LBS8.pack . T.unpack
+instance ToJSON EventId   where toJSON    = String . T.decodeASCII . LBS.toStrict . correlationId
 
