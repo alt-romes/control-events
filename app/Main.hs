@@ -25,8 +25,11 @@ main = getArgs >>= \case
           -- subprocess. maybe just don't have summary messages for running scripts like this.
 
           event c meta{scope=Just e} "subtask" \_ -> do
-            done "" <$> putStrLn "doing a subtask"
+            done "Subtask OK" <$> putStrLn "doing a subtask"
 
-          done "" <$> waitForProcess ph
+          ec <- waitForProcess ph
+          case ec of
+            ExitSuccess -> pure (done "" ec)
+            ExitFailure f -> pure (failed ("failed with exit code " ++ show f) ec)
 
       exitWith exitCode

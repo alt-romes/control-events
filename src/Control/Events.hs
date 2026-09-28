@@ -129,7 +129,7 @@ event (Conn mc conn_base) emt topic k
 
   endEvent (EventId{correlationId}, ref) = do
     edn <- fromMaybe exception_done <$> readIORef ref
-    publishq mc (full_topic <> "finished") (JSON.encode edn.summary) False{-retain-}
+    publishq mc (full_topic <> "finished") (JSON.encode edn) False{-retain-}
              QoS2 [PropCorrelationData correlationId]
     where
       exception_done = EvtDone
