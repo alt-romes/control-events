@@ -1,8 +1,6 @@
 module Main (main) where
 
-import qualified MyLib (someFunc)
+import Control.Events
 
 main :: IO ()
-main = do
-  putStrLn "Hello, Haskell!"
-  MyLib.someFunc
+main = undefined
