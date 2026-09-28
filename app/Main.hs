@@ -18,14 +18,11 @@ main = getArgs >>= \case
     go topic exe args = do
       exitCode <- withConn (script) \c -> do
 
-        event c meta (topic <> "my-event") \e -> do
+        event c meta (topic <> "my-event") \_ -> do
           (_,_,_,ph) <- createProcess (proc exe args)
           -- todo: how to read a summary message off of the output? the challenge
           -- is we want to behave exactly as if stdout was inherited by the
           -- subprocess. maybe just don't have summary messages for running scripts like this.
-
-          event c meta{scope=Just e} "subtask" \_ -> do
-            done "Subtask OK" <$> putStrLn "doing a subtask"
 
           ec <- waitForProcess ph
           case ec of
