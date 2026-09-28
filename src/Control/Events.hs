@@ -6,7 +6,7 @@ module Control.Events
 
   -- * Running tasks delimited by events
   , event
-  , EventId, EvtMeta(..), meta
+  , EventId, EvtMsg(..), simple
   , EvtDone(..), done, failed
 
   -- ** Topics
@@ -15,7 +15,6 @@ module Control.Events
   ) where
 
 import Data.Maybe
-import Data.Coerce
 import Data.IORef
 import GHC.Generics
 import Control.Exception
@@ -28,7 +27,6 @@ import qualified Data.UUID.V4 as UUID
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.ByteString.Lazy.Char8 as LBS8
 
 -- todo: waitForClient wrapper, for subscribers
 --------------------------------------------------------------------------------
@@ -80,9 +78,10 @@ withConn serviceTopic = bracket connectBroker disconnectBroker where
 -- | An identifier to correlate scoped events and start/stop events
 data EventId = EventId { correlationId :: LBS.ByteString, evtTopic :: Topic }
 
-data EvtMeta = EvtMeta
+data EvtMsg m = EvtMsg
   { scope   :: Maybe EventId
   , timeout :: Int
+  , content :: m
   -- , rules   :: [String]
   }
   deriving stock Generic
@@ -95,10 +94,11 @@ data EvtDone = EvtDone
   deriving stock Generic
   deriving anyclass ToJSON
 
-meta :: EvtMeta
-meta = EvtMeta
+simple :: a -> EvtMsg a
+simple x = EvtMsg
   { scope = Nothing
   , timeout = 300 -- seconds
+  , content = x
   }
 
 done, failed :: String -> r -> (EvtDone, r)
@@ -108,12 +108,12 @@ failed msg r = (EvtDone msg False, r)
 --------------------------------------------------------------------------------
 
 -- | Send a delimited "transactional" event
-event :: Conn -> EvtMeta -> Topic -> (EventId -> IO (EvtDone, r)) -> IO r
-event (Conn mc conn_base) emt topic k
+event :: ToJSON m => Conn -> EvtMsg m -> Topic -> (EventId -> IO (EvtDone, r)) -> IO r
+event (Conn mc conn_base) edt topic k
   = bracket startEvent endEvent $ \(ev, ref) ->
       k ev >>= \(edn, r) -> r <$ writeIORef ref (Just edn)
   where
-  base_topic = maybe conn_base evtTopic emt.scope
+  base_topic = maybe conn_base evtTopic edt.scope
   full_topic = base_topic <> topic
 
   -- Always do a "transaction": explicit start evt before we do anything,
@@ -123,7 +123,7 @@ event (Conn mc conn_base) emt topic k
   startEvent = do
     correlationId <- UUID.toLazyASCIIBytes <$> UUID.nextRandom
     ref           <- newIORef Nothing
-    publishq mc (full_topic <> "start") (JSON.encode emt) False{-retain-}
+    publishq mc (full_topic <> "start") (JSON.encode edt) False{-retain-}
              QoS2 [PropCorrelationData correlationId]
     pure (EventId{correlationId, evtTopic=full_topic}, ref)
 
