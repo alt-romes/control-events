@@ -28,7 +28,9 @@ executable control-events
     main-is:          Main.hs
     build-depends:
         base,
-        control-events
+        control-events,
+        process
 
+    ghc-options: -threaded
     hs-source-dirs:   app
     default-language: GHC2024

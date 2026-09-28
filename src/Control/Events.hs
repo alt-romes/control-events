@@ -6,14 +6,17 @@ module Control.Events
 
   -- * Running tasks delimited by events
   , event
-  , EventId, EvtMeta(..)
+  , EventId, EvtMeta(..), meta
+  , EvtDone(..), done, failed
 
   -- ** Topics
   , script, server
+  , mkTopic
   ) where
 
 import Data.Maybe
 import Data.Coerce
+import Data.IORef
 import GHC.Generics
 import Control.Exception
 import Data.Aeson as JSON
@@ -44,7 +47,7 @@ data Conn = Conn MQTTClient Topic
 -- connection, so it should represent the service rather than any particular
 -- task.
 withConn :: Topic -- ^ Service topic, e.g. @'server' <> "kanjideck-fulfillment"@
-                    --                    or @'script' <> "finances" <> "mercurybank-hs"@
+                  --                    or @'script' <> "finances" <> "mercurybank-hs"@
          -> (Conn -> IO r)
          -> IO r
 withConn serviceTopic = bracket connectBroker disconnectBroker where
@@ -77,29 +80,36 @@ withConn serviceTopic = bracket connectBroker disconnectBroker where
 newtype EventId = EventId { correlationId :: LBS.ByteString }
 
 data EvtMeta = EvtMeta
-  { start       :: EvtStart
-  , done        :: EvtDone
-  }
-
-data EvtStart = EvtStart
   { scope   :: Maybe EventId
   , timeout :: Int
   -- , rules   :: [String]
   }
   deriving stock Generic
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass ToJSON
 
 data EvtDone = EvtDone
   { summary :: String
+  , success :: Bool
   }
   deriving stock Generic
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass ToJSON
+
+meta :: EvtMeta
+meta = EvtMeta
+  { scope = Nothing
+  , timeout = 300 -- seconds
+  }
+
+done, failed :: String -> r -> (EvtDone, r)
+done   msg r = (EvtDone msg True, r)
+failed msg r = (EvtDone msg False, r)
 
 --------------------------------------------------------------------------------
 
 -- | Send a delimited "transactional" event
-event :: Conn -> EvtMeta -> Topic -> (EventId -> IO r) -> IO r
-event (Conn mc base) meta topic = bracket startEvent endEvent where
+event :: Conn -> EvtMeta -> Topic -> (EventId -> IO (EvtDone, r)) -> IO r
+event (Conn mc base) emt topic k
+  = bracket startEvent endEvent (\(ev, ref) -> k ev >>= \(edn, r) -> r <$ writeIORef ref (Just edn)) where
 
   -- Always do a "transaction": explicit start evt before we do anything,
   -- followed by an end event when done. The start "acquire" is crucial to
@@ -107,13 +117,19 @@ event (Conn mc base) meta topic = bracket startEvent endEvent where
   -- send a fail event.
   startEvent = do
     correlationId <- UUID.toLazyASCIIBytes <$> UUID.nextRandom
-    publishq mc (base <> topic) (JSON.encode meta.start) False{-retain-}
+    ref           <- newIORef Nothing
+    publishq mc (base <> topic <> "start") (JSON.encode emt) False{-retain-}
              QoS2 [PropCorrelationData correlationId]
-    pure EventId{correlationId}
+    pure (EventId{correlationId}, ref)
 
-  endEvent EventId{correlationId} = do
-    publishq mc (base <> topic) (JSON.encode meta.done) False{-retain-}
+  endEvent (EventId{correlationId}, ref) = do
+    edn <- fromMaybe exception_done <$> readIORef ref
+    publishq mc (base <> topic <> "finished") (JSON.encode edn.summary) False{-retain-}
              QoS2 [PropCorrelationData correlationId]
+    where
+      exception_done = EvtDone
+        { summary = "Exception occurred" -- todo: more info, how?
+        , success = False }
 
 --------------------------------------------------------------------------------
 
