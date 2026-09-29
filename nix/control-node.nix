@@ -1,6 +1,6 @@
 { self, inputs, ... }:
 let
-  nodeOptions = { self', lib, pkgs, ... }: {
+  nodeOptions = { lib, pkgs, ... }: {
     options = {
       services.control-events-node = {
         enable = lib.mkEnableOption "a control-events-node on this machine, which listens for control-events";
@@ -37,7 +37,7 @@ let
         };
         package = lib.mkOption {
           type = lib.types.package;
-          default = self'.packages.default;
+          default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
           description = "The control-events package to use and install.";
         };
       };
