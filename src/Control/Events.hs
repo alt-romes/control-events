@@ -114,6 +114,10 @@ data EvtMsg m = EvtMsg
 data EvtDone = EvtDone
   { summary   :: String
   , success   :: Bool
+  -- , content   :: m
+  -- should we be able to send extra content in the done
+  -- somehow? a difficulty is that the types don't match when we send an
+  -- EvtDone in the exception case.
   }
   deriving stock Generic
   deriving anyclass (ToJSON, FromJSON)
