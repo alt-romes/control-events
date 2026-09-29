@@ -48,9 +48,8 @@ runHealthcheck topic exe args = do
   _ <- forkIO do
     withConn healthcheck \c ->
       forever do
-        let msg = (simple (unwords (exe:args)))
-              { expected = Just 60
-              }
+        let msg = simple (unwords (exe:args))
+                    &? NextExpected 60
 
         event c msg topic \_ -> pure (done "" ())
 

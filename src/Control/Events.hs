@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings, OverloadedRecordDot, DeriveAnyClass #-}
+{-# OPTIONS_GHC -Wno-orphans #-} -- JSON Topic
 module Control.Events
   (
   -- * Establishing a connection
@@ -8,6 +9,9 @@ module Control.Events
   , event
   , EventId, EvtMsg(..), simple
   , EvtDone(..), done, failed
+
+  -- ** Rules
+  , Rule(..), (&?)
 
   -- ** Topics
   , script, server, healthcheck
@@ -78,22 +82,20 @@ withConn serviceTopic = bracket connectBroker disconnectBroker where
 --------------------------------------------------------------------------------
 
 -- | An identifier to correlate scoped events and start/stop events
-data EventId = EventId { correlationId :: LBS.ByteString, evtTopic :: Topic }
+data EventId = EventId { correlationId :: UUID.UUID, evtTopic :: Topic }
+  deriving stock Generic
+  deriving anyclass (ToJSON, FromJSON)
 
 data Timed a = Timed { at :: UTCTime, x :: a }
   deriving stock Generic
-  deriving anyclass ToJSON
+  deriving anyclass (ToJSON, FromJSON)
 
 data EvtMsg m = EvtMsg
   { scope    :: Maybe EventId
     -- ^ If this event should be correlated with an 'event' run whose scope
     -- captures this one.
-  , expected :: Maybe NominalDiffTime
-    -- ^ When is a next message expected, at the latest, after this one, for
-    -- the topic this message was sent under?
-  , timeout  :: Int
-    -- ^ How much time in seconds to wait for a "finished" message before
-    -- considering the service dead.
+  , rules    :: [Rule]
+    -- ^ Validation rules
   , label    :: String
     -- ^ A label describing this event
   , content  :: m
@@ -101,20 +103,19 @@ data EvtMsg m = EvtMsg
     -- this event
   }
   deriving stock Generic
-  deriving anyclass ToJSON
+  deriving anyclass (ToJSON, FromJSON)
 
 data EvtDone = EvtDone
   { summary   :: String
   , success   :: Bool
   }
   deriving stock Generic
-  deriving anyclass ToJSON
+  deriving anyclass (ToJSON, FromJSON)
 
 simple :: String -> EvtMsg ()
 simple x = EvtMsg
   { scope    = Nothing
-  , expected = Nothing
-  , timeout  = 300 -- seconds
+  , rules    = [EvtTimeout 300]
   , label    = x
   , content  = ()
   }
@@ -122,6 +123,29 @@ simple x = EvtMsg
 done, failed :: String -> r -> (EvtDone, r)
 done   msg r = (EvtDone msg True, r)
 failed msg r = (EvtDone msg False, r)
+
+-- ** Rules --------------------------------------------------------------------
+
+-- | Internal consistency/sanity checks/validation rules for this event
+data Rule
+  = EvtTimeout
+    { timeout :: Int
+    -- ^ How much time in seconds to wait for a "finished" message for this
+    -- "start" message before considering the service failed?
+    }
+  | NextExpected
+    { diff :: NominalDiffTime
+    -- ^ When is a next "start" message expected, at the latest, after this
+    -- one, for the same topic this message was sent on?
+    }
+  deriving stock Generic
+  deriving anyclass (ToJSON, FromJSON)
+
+-- | Add a validation rule to the message
+(&?) :: EvtMsg m -> Rule -> EvtMsg m
+(&?) msg r = msg { rules = r:rules msg }
+
+infixl 1 &?
 
 --------------------------------------------------------------------------------
 
@@ -139,18 +163,18 @@ event (Conn mc conn_base) edt topic k
   -- also detect cases in which we failed to do the task and couldn't even
   -- send a fail event.
   startEvent = do
-    correlationId <- UUID.toLazyASCIIBytes <$> UUID.nextRandom
+    correlationId <- UUID.nextRandom
     ref           <- newIORef Nothing
     now           <- getCurrentTime
     publishq mc (full_topic <> "start") (JSON.encode (Timed now edt)) False{-retain-}
-             QoS2 [PropCorrelationData correlationId]
+             QoS2 [PropCorrelationData (UUID.toLazyASCIIBytes correlationId)]
     pure (EventId{correlationId, evtTopic=full_topic}, ref)
 
   endEvent (EventId{correlationId}, ref) = do
     now <- getCurrentTime
     edn <- fromMaybe exception_done <$> readIORef ref
     publishq mc (full_topic <> "finished") (JSON.encode (Timed now edn)) False{-retain-}
-             QoS2 [PropCorrelationData correlationId]
+             QoS2 [PropCorrelationData (UUID.toLazyASCIIBytes correlationId)]
     where
       exception_done = EvtDone
         { summary  = "Exception occurred" -- todo: more info, how?
@@ -158,5 +182,5 @@ event (Conn mc conn_base) edt topic k
 
 --------------------------------------------------------------------------------
 
-instance ToJSON EventId where toJSON = String . T.decodeASCII . LBS.toStrict . correlationId
-
+instance ToJSON   Topic where toJSON    = toJSON . unTopic
+instance FromJSON Topic where parseJSON = withText "Topic" $ pure . fromJust . mkTopic
