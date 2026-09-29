@@ -2,7 +2,6 @@
 module Main (main) where
 
 import GHC.Generics
-import Data.Time.Clock
 import Control.Monad
 import Control.Concurrent
 import Options.Generic
@@ -50,7 +49,7 @@ runHealthcheck topic exe args = do
     withConn healthcheck \c ->
       forever do
         let msg = (simple (unwords (exe:args)))
-              { expected = Just (Nominal (secondsToDiffTime 1*60))
+              { expected = Just 60
               }
 
         event c msg topic \_ -> pure (done "" ())
