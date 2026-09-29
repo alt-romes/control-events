@@ -8,7 +8,7 @@ module Control.Events
   -- * Running tasks delimited by events
   , event
   , EventId(..), Timed(..)
-  , EvtMsg(..), simple
+  , EvtMsg(..), simple, scoped
   , EvtDone(..), done, failed
 
   -- ** Rules
@@ -128,6 +128,9 @@ simple x = EvtMsg
   , label    = x
   , content  = ()
   }
+
+scoped :: Lens' (EvtMsg m) (Maybe EventId)
+scoped = lens (\s -> s.scope) (\s b -> s{scope = b})
 
 done, failed :: String -> r -> (EvtDone, r)
 done   msg r = (EvtDone msg True, r)
