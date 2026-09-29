@@ -32,14 +32,15 @@ runScript topic exe args = do
 
     event c (simple (unwords (exe:args))) topic \_ -> do
       (_,_,_,ph) <- createProcess (proc exe args)
-      -- todo: how to read a summary message off of the output? the challenge
-      -- is we want to behave exactly as if stdout was inherited by the
-      -- subprocess. maybe just don't have summary messages for running scripts like this.
+        -- we can't read the output of the program without changing its
+        -- behavior wrt the stdout / tty things. The stdout/err/in must remain
+        -- as 'Inherit' to ensure it is just as if the program had been invoked
+        -- directly.
 
       ec <- waitForProcess ph
       case ec of
-        ExitSuccess -> pure (done "" ec)
-        ExitFailure f -> pure (failed ("failed with exit code " ++ show f) ec)
+        ExitSuccess   -> pure (done "Ran successfully" ec)
+        ExitFailure f -> pure (failed ("Failed with exit code " ++ show f) ec)
 
   exitWith exitCode
 
