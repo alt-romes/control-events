@@ -7,7 +7,8 @@ module Control.Events
 
   -- * Running tasks delimited by events
   , event
-  , EventId, EvtMsg(..), simple
+  , EventId(..), Timed(..)
+  , EvtMsg(..), simple
   , EvtDone(..), done, failed
 
   -- ** Rules
