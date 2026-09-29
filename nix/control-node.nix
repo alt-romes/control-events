@@ -1,6 +1,6 @@
 { self, inputs, ... }:
 let
-  nodeOptions = { lib, ... }: {
+  nodeOptions = { self', lib, pkgs, ... }: {
     options = {
       services.control-events-node = {
         enable = lib.mkEnableOption "a control-events-node on this machine, which listens for control-events";
@@ -35,11 +35,17 @@ let
             proxying to the same target. Required if proxyTo is not null.
             '';
         };
+        package = lib.mkOption {
+          type = lib.types.package;
+          default = self'.packages.default;
+          description = "The control-events package to use and install.";
+        };
       };
     };
   };
 in
 {
+
   flake.darwinModules.control-events = { config, lib, pkgs, ... }:
   let
     # Evaluate the nixos control-events module within the context of a full
@@ -65,6 +71,8 @@ in
   {
     imports = [ nodeOptions ];
     config = lib.mkIf cfg.enable {
+      environment.systemPackages = [ cfg.package ];
+
       # launchd chdirs into WorkingDirectory, so it must already exist
       system.activationScripts.preActivation.text = ''
         mkdir -p ${mosquitto.dataDir}
@@ -112,6 +120,7 @@ in
     imports = [ nodeOptions ];
 
     config = lib.mkIf cfg.enable {
+      environment.systemPackages = [ cfg.package ];
 
       services.mosquitto = {
         enable = true;
