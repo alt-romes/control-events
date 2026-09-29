@@ -47,14 +47,13 @@ runScript topic exe args = do
 runHealthcheck :: Topic -> FilePath -> [String] -> IO ()
 runHealthcheck topic exe args = do
   _ <- forkIO do
-    withConn server \c ->
+    withConn healthcheck \c ->
       forever do
-        let msg = (simple (exe ++ " healthcheck"))
+        let msg = (simple (unwords (exe:args)))
               { expected = Just (Nominal (secondsToDiffTime 1*60))
               }
 
-        event c msg (topic <> "healthcheck")
-          \_ -> pure (done "" ())
+        event c msg topic \_ -> pure (done "" ())
 
         threadDelay (1*60*1_000_000) -- microseconds
 

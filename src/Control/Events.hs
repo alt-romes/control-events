@@ -10,7 +10,7 @@ module Control.Events
   , EvtDone(..), done, failed
 
   -- ** Topics
-  , script, server
+  , script, server, healthcheck
   , mkTopic
   ) where
 
@@ -32,9 +32,10 @@ import qualified Data.ByteString.Lazy as LBS
 -- todo: waitForClient wrapper, for subscribers
 --------------------------------------------------------------------------------
 
-script, server :: Topic
+script, server, healthcheck :: Topic
 script = fromJust (mkTopic "script")
 server = fromJust (mkTopic "server")
+healthcheck = fromJust (mkTopic "healthcheck")
 
 --------------------------------------------------------------------------------
 
