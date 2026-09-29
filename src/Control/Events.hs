@@ -81,6 +81,7 @@ data EventId = EventId { correlationId :: LBS.ByteString, evtTopic :: Topic }
 data EvtMsg m = EvtMsg
   { scope   :: Maybe EventId
   , timeout :: Int
+  , label   :: String
   , content :: m
   -- , rules   :: [String]
   }
@@ -98,6 +99,7 @@ simple :: a -> EvtMsg a
 simple x = EvtMsg
   { scope = Nothing
   , timeout = 300 -- seconds
+  , label   = ""
   , content = x
   }
 
