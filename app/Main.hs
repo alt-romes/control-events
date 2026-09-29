@@ -49,7 +49,8 @@ runHealthcheck topic exe args = do
     withConn healthcheck \c ->
       forever do
         let msg = simple (unwords (exe:args))
-                    &? NextExpected 60
+                    & evtExpected ?~ 60{-seconds-}
+                    & evtTimeout  .~ 60{-seconds-}
 
         event c msg topic \_ -> pure (done "" ())
 

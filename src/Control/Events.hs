@@ -12,11 +12,15 @@ module Control.Events
   , EvtDone(..), done, failed
 
   -- ** Rules
-  , Rule(..), (&?)
+  , Rules(..)
+  , evtTimeout, evtExpected
 
   -- ** Topics
   , script, server, healthcheck
   , mkTopic
+
+  -- * Re-exports
+  , module Lens.Micro
   ) where
 
 import Data.Maybe
@@ -25,6 +29,7 @@ import Data.Time.Clock
 import GHC.Generics
 import Control.Exception
 import Data.Aeson as JSON
+import Lens.Micro
 import Network.URI (parseURI)
 import Network.MQTT.Client
 import Network.MQTT.Topic
@@ -95,7 +100,7 @@ data EvtMsg m = EvtMsg
   { scope    :: Maybe EventId
     -- ^ If this event should be correlated with an 'event' run whose scope
     -- captures this one.
-  , rules    :: [Rule]
+  , rules    :: Rules
     -- ^ Validation rules
   , label    :: String
     -- ^ A label describing this event
@@ -116,7 +121,10 @@ data EvtDone = EvtDone
 simple :: String -> EvtMsg ()
 simple x = EvtMsg
   { scope    = Nothing
-  , rules    = [EvtTimeout 300]
+  , rules    = Rules
+    { timeout = 300
+    , expected = Nothing
+    }
   , label    = x
   , content  = ()
   }
@@ -128,25 +136,22 @@ failed msg r = (EvtDone msg False, r)
 -- ** Rules --------------------------------------------------------------------
 
 -- | Internal consistency/sanity checks/validation rules for this event
-data Rule
-  = EvtTimeout
-    { timeout :: Int
+data Rules = Rules
+  { timeout  :: Int
     -- ^ How much time in seconds to wait for a "finished" message for this
     -- "start" message before considering the service failed?
-    }
-  | NextExpected
-    { diff :: NominalDiffTime
+  , expected :: Maybe NominalDiffTime
     -- ^ When is a next "start" message expected, at the latest, after this
     -- one, for the same topic this message was sent on?
-    }
+  }
   deriving stock Generic
   deriving anyclass (ToJSON, FromJSON)
 
--- | Add a validation rule to the message
-(&?) :: EvtMsg m -> Rule -> EvtMsg m
-(&?) msg r = msg { rules = r:rules msg }
+evtTimeout :: Lens' (EvtMsg m) Int
+evtTimeout = lens (\s -> s.rules.timeout) (\s b -> s{rules = s.rules{timeout = b}})
 
-infixl 1 &?
+evtExpected :: Lens' (EvtMsg m) (Maybe NominalDiffTime)
+evtExpected = lens (\s -> s.rules.expected) (\s b -> s{rules = s.rules{expected = b}})
 
 --------------------------------------------------------------------------------
 
