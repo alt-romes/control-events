@@ -156,7 +156,7 @@ simple x = EvtMsg
 scoped :: Lens' (EvtMsg m) (Maybe EventId)
 scoped = lens (\s -> s.scope) (\s b -> s{scope = b})
 
-withMsg :: Lens' (EvtMsg m) (Maybe m)
+withMsg :: Lens (EvtMsg m) (EvtMsg n) (Maybe m) (Maybe n)
 withMsg = lens (\s -> s.content) (\s b -> s{content = b})
 
 -- ** Evt Done -----------------------------------------------------------------
