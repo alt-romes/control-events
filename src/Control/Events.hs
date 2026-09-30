@@ -148,6 +148,7 @@ simple x = EvtMsg
   , rules    = Rules
     { timeout = 300
     , expected = Nothing
+    , critical = False
     }
   , label    = x
   , content  = Nothing
@@ -190,6 +191,9 @@ data Rules = Rules
   , expected :: Maybe NominalDiffTime
     -- ^ When is a next "start" message expected, at the latest, after this
     -- one, for the same topic this message was sent on?
+  , critical :: Bool
+    -- ^ A rule validation engine must warn critically (CRITICAL FAILURE) if
+    -- any of the rules are violated when @critical = True@
   }
   deriving stock Generic
   deriving anyclass (ToJSON, FromJSON)
