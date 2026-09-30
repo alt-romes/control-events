@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, OverloadedRecordDot, DeriveAnyClass #-}
+{-# LANGUAGE CPP, OverloadedStrings, OverloadedRecordDot, DeriveAnyClass #-}
 {-# OPTIONS_GHC -Wno-orphans #-} -- JSON Topic
 module Control.Events
   (
@@ -221,7 +221,11 @@ event (Conn mc conn_base) edt topic k = do
   exception_done e = EvtDone
     { summary  = "An exception occurred"
     , success  = False
+#if MIN_VERSION_base(4,22,0)
     , result   = Just (toJSON $ displayExceptionWithInfo e)
+#else
+    , result   = Just (toJSON $ displayException e)
+#endif
     }
 
 --------------------------------------------------------------------------------
