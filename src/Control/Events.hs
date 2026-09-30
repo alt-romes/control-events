@@ -8,8 +8,10 @@ module Control.Events
   -- * Running tasks delimited by events
   , event
   , EventId(..), Timed(..)
-  , EvtMsg(..), simple, scoped
+  , EvtMsg(..), simple
+  , scoped, withMsg
   , EvtDone(..), done, failed
+  , withResult
 
   -- ** Rules
   , Rules(..)
@@ -104,20 +106,9 @@ data EvtMsg m = EvtMsg
     -- ^ Validation rules
   , label    :: String
     -- ^ A label describing this event
-  , content  :: m
+  , content  :: Maybe m
     -- ^ Additional content, that may be used e.g. by listeners reacting to
     -- this event
-  }
-  deriving stock Generic
-  deriving anyclass (ToJSON, FromJSON)
-
-data EvtDone = EvtDone
-  { summary   :: String
-  , success   :: Bool
-  -- , content   :: m
-  -- should we be able to send extra content in the done
-  -- somehow? a difficulty is that the types don't match when we send an
-  -- EvtDone in the exception case.
   }
   deriving stock Generic
   deriving anyclass (ToJSON, FromJSON)
@@ -130,15 +121,31 @@ simple x = EvtMsg
     , expected = Nothing
     }
   , label    = x
-  , content  = ()
+  , content  = Nothing
   }
 
 scoped :: Lens' (EvtMsg m) (Maybe EventId)
 scoped = lens (\s -> s.scope) (\s b -> s{scope = b})
 
-done, failed :: String -> r -> (EvtDone, r)
-done   msg r = (EvtDone msg True, r)
-failed msg r = (EvtDone msg False, r)
+withMsg :: Lens' (EvtMsg m) (Maybe m)
+withMsg = lens (\s -> s.content) (\s b -> s{content = b})
+
+-- ** Evt Done -----------------------------------------------------------------
+
+data EvtDone m = EvtDone
+  { summary   :: String
+  , success   :: Bool
+  , result    :: Maybe m
+  }
+  deriving stock Generic
+  deriving anyclass (ToJSON, FromJSON)
+
+done, failed :: String -> r -> (EvtDone a, r)
+done   msg r = (EvtDone msg True Nothing, r)
+failed msg r = (EvtDone msg False Nothing, r)
+
+withResult :: Lens' (EvtDone m, r) (Maybe m)
+withResult = lens (\(s,_) -> s.result) (\(s,r) b -> (s{result = b}, r))
 
 -- ** Rules --------------------------------------------------------------------
 
@@ -163,7 +170,7 @@ evtExpected = lens (\s -> s.rules.expected) (\s b -> s{rules = s.rules{expected 
 --------------------------------------------------------------------------------
 
 -- | Send a delimited "transactional" event
-event :: ToJSON m => Conn -> EvtMsg m -> Topic -> (EventId -> IO (EvtDone, r)) -> IO r
+event :: (ToJSON m, ToJSON n) => Conn -> EvtMsg m -> Topic -> (EventId -> IO (EvtDone n, r)) -> IO r
 event (Conn mc conn_base) edt topic k
   = bracket startEvent endEvent $ \(ev, ref) ->
       k ev >>= \(edn, r) -> r <$ writeIORef ref (Just edn)
@@ -191,7 +198,9 @@ event (Conn mc conn_base) edt topic k
     where
       exception_done = EvtDone
         { summary  = "Exception occurred" -- todo: more info, how?
-        , success  = False }
+        , success  = False
+        , result   = Nothing
+        }
 
 --------------------------------------------------------------------------------
 
