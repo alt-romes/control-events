@@ -37,7 +37,6 @@ import Network.MQTT.Client
 import Network.MQTT.Topic
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
-import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.ByteString.Lazy as LBS
 
@@ -63,13 +62,27 @@ withConn :: Topic -- ^ Service topic, e.g. @'server' <> "kanjideck-fulfillment"@
                   --                    or perhaps even just @'script'@.
          -> (Conn -> IO r)
          -> IO r
-withConn serviceTopic = bracket connectBroker disconnectBroker where
+withConn = withPersistentConn Nothing
+
+-- | Like 'withConn', but the session is persistent, so messages meant for it
+-- are queued even if we are offline, and delivered on reconnect.
+withPersistentConn
+  :: Maybe String
+  -- ^ A persistent connection ID. If the connection goes down, messages meant
+  -- for this listener will be queued and delivered when we reconnect using the
+  -- same ID.
+  -> Topic
+  -> (Conn -> IO r)
+  -> IO r
+withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker where
   connectBroker = do
     let
       Just uri = parseURI "mqtt://127.0.0.1"
       config = mqttConfig
         {
-          _cleanSession = False -- keep msgs the meant for a client which is offline
+          _cleanSession = case mbyID of
+              Nothing -> True  -- no persistence, do clean session
+              Just _  -> False -- keep msgs the meant for a client which is offline
         , _lwt = Just LastWill
             { _willRetain = False
             , _willQoS = QoS2
@@ -79,13 +92,7 @@ withConn serviceTopic = bracket connectBroker disconnectBroker where
             , _willProps = []
             }
         , _protocol = Protocol50
-        , _connID   = "" -- T.unpack (unTopic serviceTopic)
-          -- TODO: To have a persistent listener session (that
-          -- receives messages for it even if it is temporarily
-          -- offline), we need a connID. But we don't want an ID by default
-          -- since starting a second connection with the same ID will kill the
-          -- previous one (e.g. two `control-event script same_topic` running
-          -- at once will cancel each other)
+        , _connID   = fromMaybe "" mbyID
         }
     mc <- connectURI config uri
     pure (Conn mc serviceTopic)
