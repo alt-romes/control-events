@@ -26,7 +26,6 @@ module Control.Events
   ) where
 
 import Data.Maybe
-import Data.IORef
 import Data.Time.Clock
 import GHC.Generics
 import Control.Exception
@@ -176,9 +175,16 @@ evtExpected = lens (\s -> s.rules.expected) (\s b -> s{rules = s.rules{expected 
 
 -- | Send a delimited "transactional" event
 event :: (ToJSON m) => Conn -> EvtMsg m -> Topic -> (EventId -> IO (EvtDone, r)) -> IO r
-event (Conn mc conn_base) edt topic k
-  = bracket startEvent endEvent $ \(ev, ref) ->
-      k ev >>= \(edn, r) -> r <$ writeIORef ref (Just edn)
+event (Conn mc conn_base) edt topic k = do
+  mask $ \restore -> do
+    eid <- startEvent
+    (dn, r)
+        <- restore (k eid)
+            `catch` \(e::SomeException) -> do
+                      endEvent (eid, exception_done e)
+                      throwIO e
+    _ <- endEvent (eid, dn)
+    return r
   where
   base_topic = maybe conn_base evtTopic edt.scope
   full_topic = base_topic <> topic
@@ -189,23 +195,21 @@ event (Conn mc conn_base) edt topic k
   -- send a fail event.
   startEvent = do
     correlationId <- UUID.nextRandom
-    ref           <- newIORef Nothing
     now           <- getCurrentTime
     publishq mc (full_topic <> "start") (JSON.encode (Timed now edt)) False{-retain-}
              QoS2 [PropCorrelationData (UUID.toLazyASCIIBytes correlationId)]
-    pure (EventId{correlationId, evtTopic=full_topic}, ref)
+    pure EventId{correlationId, evtTopic=full_topic}
 
-  endEvent (EventId{correlationId}, ref) = do
+  endEvent (EventId{correlationId}, edn) = do
     now <- getCurrentTime
-    edn <- fromMaybe exception_done <$> readIORef ref
     publishq mc (full_topic <> "finished") (JSON.encode (Timed now edn)) False{-retain-}
              QoS2 [PropCorrelationData (UUID.toLazyASCIIBytes correlationId)]
-    where
-      exception_done = EvtDone
-        { summary  = "Exception occurred" -- todo: more info, how?
-        , success  = False
-        , result   = Nothing
-        }
+
+  exception_done e = EvtDone
+    { summary  = "An exception occurred"
+    , success  = False
+    , result   = Just (toJSON $ displayExceptionWithInfo e)
+    }
 
 --------------------------------------------------------------------------------
 
