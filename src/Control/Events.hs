@@ -77,7 +77,8 @@ withPersistentConn
 withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker where
   connectBroker = do
     let
-      Just uri = parseURI "mqtt://127.0.0.1"
+      Just uri = parseURI $ "mqtt://127.0.0.1" ++ maybe "" ('#':) mbyID
+                  -- the _connID is parsed from the URI on `connectURI`.
       config = mqttConfig
         {
           _cleanSession = case mbyID of
@@ -92,7 +93,7 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
             , _willProps = []
             }
         , _protocol = Protocol50
-        , _connID   = fromMaybe "" mbyID
+        , _connID   = fromMaybe "" mbyID -- is always overwritten by the #<id> in the URI.
         }
     mc <- connectURI config uri
     pure (Conn mc serviceTopic)
