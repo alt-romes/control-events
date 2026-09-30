@@ -17,6 +17,7 @@ module Control.Events
   -- ** Rules
   , Rules(..)
   , evtTimeout, evtExpected
+  , evtSubtasks, evtCritical
 
   -- ** Topics
   , script, server, healthcheck
@@ -148,6 +149,7 @@ simple x = EvtMsg
   , rules    = Rules
     { timeout = 300
     , expected = Nothing
+    , subtasks = Nothing
     , critical = False
     }
   , label    = x
@@ -191,6 +193,12 @@ data Rules = Rules
   , expected :: Maybe NominalDiffTime
     -- ^ When is a next "start" message expected, at the latest, after this
     -- one, for the same topic this message was sent on?
+  , subtasks :: Maybe [String]
+    -- ^ There must be exactly one sub-event per entry on the list, where the
+    -- entry is the suffix of a topic whose prefix is this event's topic.
+    --
+    -- That is, for @[t1, t2, t3]@, we expect exactly three events scoped under
+    -- this one, sent like @event c (msg & scoped ?~ <this_event>) t{1,2,3} ...@
   , critical :: Bool
     -- ^ A rule validation engine must warn critically (CRITICAL FAILURE) if
     -- any of the rules are violated when @critical = True@
@@ -203,6 +211,12 @@ evtTimeout = lens (\s -> s.rules.timeout) (\s b -> s{rules = s.rules{timeout = b
 
 evtExpected :: Lens' (EvtMsg m) (Maybe NominalDiffTime)
 evtExpected = lens (\s -> s.rules.expected) (\s b -> s{rules = s.rules{expected = b}})
+
+evtSubtasks :: Lens' (EvtMsg m) (Maybe [String])
+evtSubtasks = lens (\s -> s.rules.subtasks) (\s b -> s{rules = s.rules{subtasks = b}})
+
+evtCritical :: Lens' (EvtMsg m) Bool
+evtCritical = lens (\s -> s.rules.critical) (\s b -> s{rules = s.rules{critical = b}})
 
 --------------------------------------------------------------------------------
 
