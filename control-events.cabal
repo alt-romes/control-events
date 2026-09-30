@@ -23,6 +23,14 @@ library
     hs-source-dirs:   src
     default-language: GHC2024
 
+library servant
+    visibility: public
+    exposed-modules:  Control.Events.Servant
+    build-depends:    base, servant-server, control-events, net-mqtt, aeson
+    hs-source-dirs:   servant
+    default-extensions: LambdaCase
+    default-language: GHC2021
+
 executable control-events
     import:           warnings
     main-is:          Main.hs
@@ -37,4 +45,5 @@ executable control-events
 
     ghc-options: -threaded
     hs-source-dirs:   app
-    default-language: GHC2024
+    default-extensions: LambdaCase
+    default-language: GHC2021
