@@ -2,7 +2,6 @@
 module Main (main) where
 
 import GHC.Generics
-import Control.Monad
 import Control.Concurrent
 import Options.Generic
 import System.Exit
@@ -46,17 +45,8 @@ runScript topic exe args = do
 
 runHealthcheck :: Topic -> FilePath -> [String] -> IO ()
 runHealthcheck topic exe args = do
-  _ <- forkIO do
-    withConn healthcheck \c ->
-      forever do
-        let msg = simple (unwords (exe:args))
-                    & evtExpected ?~ 60{-seconds-}
-                    & evtTimeout  .~ 60{-seconds-}
-
-        event c msg topic \_ -> pure (done "" ())
-
-        threadDelay (1*60*1_000_000) -- microseconds
-
+  let msg = simple (unwords (exe:args))
+  _          <- forkIO $ healthcheckThread 60 msg topic
   (_,_,_,ph) <- createProcess (proc exe args)
   waitForProcess ph >>= exitWith
 

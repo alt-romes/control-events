@@ -1,9 +1,10 @@
-{-# LANGUAGE CPP, OverloadedStrings, OverloadedRecordDot, DeriveAnyClass #-}
+{-# LANGUAGE BlockArguments, CPP, OverloadedStrings, OverloadedRecordDot, DeriveAnyClass #-}
 {-# OPTIONS_GHC -Wno-orphans #-} -- JSON Topic
 module Control.Events
   (
   -- * Establishing a connection
     withConn, Conn
+  , healthcheckThread
 
   -- * Running tasks delimited by events
   , event
@@ -28,6 +29,7 @@ module Control.Events
 import Data.Maybe
 import Data.Time.Clock
 import GHC.Generics
+import Control.Concurrent
 import Control.Exception
 import Control.Monad
 import Data.Aeson as JSON
@@ -100,6 +102,19 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
 
   -- must send DISCONNECT before exiting, otherwise LWT triggers
   disconnectBroker (Conn mc _) = normalDisconnect mc
+
+-- | The content for a thread to periodically send a healthcheck event.
+-- Usage: @forkIO (healthcheckThread ...)@
+healthcheckThread :: ToJSON m => Integer {-^ Ping frequency in seconds -} -> EvtMsg m -> Topic -> IO ()
+healthcheckThread delay_secs msg0 topic = do
+  withConn healthcheck \c ->
+    forever do
+      let msg = msg0 & evtExpected ?~ fromInteger delay_secs
+                     & evtTimeout  .~ 30
+
+      event c msg topic \_ -> pure (done "" ())
+
+      threadDelay (fromInteger delay_secs*1_000_000) -- microseconds
 
 --------------------------------------------------------------------------------
 
