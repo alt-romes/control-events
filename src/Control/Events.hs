@@ -79,7 +79,13 @@ withConn serviceTopic = bracket connectBroker disconnectBroker where
             , _willProps = []
             }
         , _protocol = Protocol50
-        , _connID   = T.unpack (unTopic serviceTopic)
+        , _connID   = "" -- T.unpack (unTopic serviceTopic)
+          -- TODO: To have a persistent listener session (that
+          -- receives messages for it even if it is temporarily
+          -- offline), we need a connID. But we don't want an ID by default
+          -- since starting a second connection with the same ID will kill the
+          -- previous one (e.g. two `control-event script same_topic` running
+          -- at once will cancel each other)
         }
     mc <- connectURI config uri
     pure (Conn mc serviceTopic)
