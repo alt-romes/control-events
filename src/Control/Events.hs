@@ -194,11 +194,16 @@ data Rules = Rules
     -- ^ When is a next "start" message expected, at the latest, after this
     -- one, for the same topic this message was sent on?
   , subtasks :: Maybe [String]
-    -- ^ There must be exactly one sub-event per entry on the list, where the
-    -- entry is the suffix of a topic whose prefix is this event's topic.
+    -- ^ There must be at least one matching sub-event per entry on the list,
+    -- where the @String@ must match the suffix of the topic (whose prefix is
+    -- this event's topic) and the sub-event scope must match this event's
+    -- correlation-id.
     --
-    -- That is, for @[t1, t2, t3]@, we expect exactly three events scoped under
-    -- this one, sent like @event c (msg & scoped ?~ <this_event>) t{1,2,3} ...@
+    -- That is, for @[t1, t2, t3]@, we expect at least three events scoped
+    -- under this one under these sub-topics exactly, sent like
+    -- @event c (msg & scoped ?~ <this_event>) t{1,2,3} ...@
+    --
+    -- There may be additional sub-events, as long as each of the listed ones has a match.
   , critical :: Bool
     -- ^ A rule validation engine must warn critically (CRITICAL FAILURE) if
     -- any of the rules are violated when @critical = True@
