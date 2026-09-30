@@ -30,6 +30,7 @@ import Data.IORef
 import Data.Time.Clock
 import GHC.Generics
 import Control.Exception
+import Control.Monad
 import Data.Aeson as JSON
 import Lens.Micro
 import Network.URI (parseURI)
@@ -132,20 +133,24 @@ withMsg = lens (\s -> s.content) (\s b -> s{content = b})
 
 -- ** Evt Done -----------------------------------------------------------------
 
-data EvtDone m = EvtDone
+data EvtDone = EvtDone
   { summary   :: String
   , success   :: Bool
-  , result    :: Maybe m
+  , result    :: Maybe Value
   }
   deriving stock Generic
   deriving anyclass (ToJSON, FromJSON)
 
-done, failed :: String -> r -> (EvtDone a, r)
+done, failed :: String -> r -> (EvtDone, r)
 done   msg r = (EvtDone msg True Nothing, r)
 failed msg r = (EvtDone msg False Nothing, r)
 
-withResult :: Lens' (EvtDone m, r) (Maybe m)
-withResult = lens (\(s,_) -> s.result) (\(s,r) b -> (s{result = b}, r))
+withResult :: (FromJSON m, ToJSON m) => Lens' (EvtDone, r) (Maybe m)
+withResult = lens (\(s,_) -> join (res . fromJSON <$> s.result))
+                  (\(s,r) b -> (s{result = toJSON <$> b}, r))
+  where
+    res (Error _)   = Nothing
+    res (Success v) = Just v
 
 -- ** Rules --------------------------------------------------------------------
 
@@ -170,7 +175,7 @@ evtExpected = lens (\s -> s.rules.expected) (\s b -> s{rules = s.rules{expected 
 --------------------------------------------------------------------------------
 
 -- | Send a delimited "transactional" event
-event :: (ToJSON m, ToJSON n) => Conn -> EvtMsg m -> Topic -> (EventId -> IO (EvtDone n, r)) -> IO r
+event :: (ToJSON m) => Conn -> EvtMsg m -> Topic -> (EventId -> IO (EvtDone, r)) -> IO r
 event (Conn mc conn_base) edt topic k
   = bracket startEvent endEvent $ \(ev, ref) ->
       k ev >>= \(edn, r) -> r <$ writeIORef ref (Just edn)
