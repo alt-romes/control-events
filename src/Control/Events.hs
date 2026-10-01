@@ -7,7 +7,7 @@ module Control.Events
   , healthcheckThread
 
   -- * Running tasks delimited by events
-  , event
+  , event, event_
   , EventId(..), Timed(..)
   , EvtMsg(..), simple
   , scoped, reacted, withMsg
@@ -335,6 +335,9 @@ event (Conn mc conn_base) edt topic k = do
 #endif
     , triggers = Nothing
     }
+
+event_ :: ToJSON m => Conn -> EvtMsg m -> Topic -> (EventId -> IO r) -> IO r
+event_ c m t k = event c m t (\e -> done "OK" <$> k e)
 
 -- react :: Conn -> Topic -> (EventId -> IO (EvtDone, r)) -> IO r
 -- react (Conn mc conn_base) topic k = do
