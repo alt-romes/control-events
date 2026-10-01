@@ -243,8 +243,8 @@ withResult = lens (\(s,_) -> join (res . fromJSON <$> s.result))
     res (Error _)   = Nothing
     res (Success v) = Just v
 
-withTriggers :: Lens' (EvtDone, r) (Maybe [Trigger])
-withTriggers = lens (\(s,_) -> s.triggers) (\(s,r) b -> (s{triggers = b}, r))
+withTriggers :: Lens' (EvtDone, r) [Trigger]
+withTriggers = lens (\(s,_) -> fromMaybe [] s.triggers) (\(s,r) b -> (s{triggers = Just b}, r))
 
 -- ** Rules --------------------------------------------------------------------
 
