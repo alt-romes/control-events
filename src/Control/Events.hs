@@ -178,9 +178,40 @@ data EvtDone = EvtDone
   { summary   :: String
   , success   :: Bool
   , result    :: Maybe Value
+  , triggers  :: Maybe [Trigger]
+    -- ^ A finished event may indicate a list of folow-up actions that can be
+    -- triggered. The 'Trigger' values specify how to trigger the *trigger*
+    -- event that this finished event announces will be reacted to.
   }
   deriving stock Generic
   deriving anyclass (ToJSON, FromJSON)
+
+-- | A specification for a *trigger* event: an event that will be reacted to to
+-- trigger a certain action by a listening process.
+--
+-- A trigger event must still form a transaction, with a start/end. The
+-- @trigger/.../start@ MQTT event requests the triggered action to be
+-- performed, whereas the @trigger/.../finished@ MQTT event indicates the
+-- triggered action was performed successfully.
+--
+-- The difference to the typical non-trigger events is that the /start and
+-- /finish events will be sent by difference processes! The process triggering
+-- the event will send a /start. The process listening for that trigger and
+-- performing it will post the /finish after performing the action.
+--
+-- This does indeed mean there may be more than one /finish for the same /start
+-- event, potentially with different results, signifying the /start event was
+-- interpreted by more than one party.
+data Trigger = Trigger
+  { triggerTopic :: Topic
+    -- ^ What topic to send this *trigger* event to
+  , triggerLabel :: String
+    -- ^ A label describing the trigger action
+  , triggerData  :: Maybe Value
+    -- ^ The data to use send as the 'content' of the 'EvtMsg' constructed for
+    -- the trigger event. This data will be used by the listening party to act
+    -- on the trigger.
+  }
 
 done, failed :: String -> r -> (EvtDone, r)
 done   msg r = (EvtDone msg True Nothing, r)
