@@ -93,12 +93,13 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
             , _willTopic = LBS.fromStrict $ T.encodeUtf8 $ unTopic $
                            serviceTopic <> "last-will-testament"
             , _willMsg = mempty
-            , _willProps =
-                [ -- 1 day, required property for messages to be kept persisted
-                  -- if not persistent, expire 0 means nothing is kept.
-                  PropSessionExpiryInterval (maybe 0 (const 86400) mbyID)
-                ]
+            , _willProps = []
             }
+        , _connProps =
+            [ -- 1 day, required property for messages to be kept persisted
+              -- if not persistent, expire 0 means nothing is kept.
+              PropSessionExpiryInterval (maybe 0 (const 86400) mbyID)
+            ]
         , _protocol = Protocol50
         , _connID   = fromMaybe "" mbyID -- is always overwritten by the #<id> in the URI.
         }
