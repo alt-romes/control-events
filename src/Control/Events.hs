@@ -10,9 +10,9 @@ module Control.Events
   , event
   , EventId(..), Timed(..)
   , EvtMsg(..), simple
-  , scoped, withMsg
+  , scoped, reacted, withMsg
   , EvtDone(..), done, failed
-  , withResult
+  , withResult, withTriggers
 
   -- ** Rules
   , Rules(..)
@@ -20,7 +20,7 @@ module Control.Events
   , evtSubtasks, evtCritical
 
   -- ** Topics
-  , script, server, healthcheck
+  , script, server, healthcheck, trigger
   , mkTopic
 
   -- * Re-exports
@@ -46,10 +46,11 @@ import qualified Data.ByteString.Lazy as LBS
 -- todo: waitForClient wrapper, for subscribers
 --------------------------------------------------------------------------------
 
-script, server, healthcheck :: Topic
+script, server, healthcheck, trigger :: Topic
 script = fromJust (mkTopic "script")
 server = fromJust (mkTopic "server")
 healthcheck = fromJust (mkTopic "healthcheck")
+trigger = fromJust (mkTopic "trigger")
 
 --------------------------------------------------------------------------------
 
@@ -142,6 +143,17 @@ data EvtMsg m = EvtMsg
   { scope    :: Maybe EventId
     -- ^ If this event should be correlated with an 'event' run whose scope
     -- captures this one.
+  , reactTo  :: Maybe EventId
+    -- ^ If specified, the 'EventId' identifies the event that this one is
+    -- reacting to.
+    --
+    -- A process may subscribe to any event (@trigger/...@ or otherwise) to do
+    -- work in reaction to that event having happened. This field lets us
+    -- connect the events that were emitted doing this reaction work to the
+    -- event that triggered doing it in the first place.
+    --
+    -- (@trigger/...@ events just happen to be more explicit about warranting a
+    -- reaction, but any other event can also be reacted to.)
   , rules    :: Rules
     -- ^ Validation rules
   , label    :: String
@@ -156,10 +168,12 @@ data EvtMsg m = EvtMsg
 simple :: String -> EvtMsg ()
 simple x = EvtMsg
   { scope    = Nothing
+  , reactTo  = Nothing
   , rules    = Rules
     { timeout = 300
     , expected = Nothing
     , subtasks = Nothing
+    , reactions = Nothing
     , critical = False
     }
   , label    = x
@@ -168,6 +182,9 @@ simple x = EvtMsg
 
 scoped :: Lens' (EvtMsg m) (Maybe EventId)
 scoped = lens (\s -> s.scope) (\s b -> s{scope = b})
+
+reacted :: Lens' (EvtMsg m) (Maybe EventId)
+reacted = lens (\s -> s.reactTo) (\s b -> s{reactTo = b})
 
 withMsg :: Lens (EvtMsg m) (EvtMsg n) (Maybe m) (Maybe n)
 withMsg = lens (\s -> s.content) (\s b -> s{content = b})
@@ -180,42 +197,44 @@ data EvtDone = EvtDone
   , result    :: Maybe Value
   , triggers  :: Maybe [Trigger]
     -- ^ A finished event may indicate a list of folow-up actions that can be
-    -- triggered. The 'Trigger' values specify how to trigger the *trigger*
-    -- event that this finished event announces will be reacted to.
+    -- triggered. The 'Trigger' values specify how to constructed the announced
+    -- *trigger* event. (This is useful for an interface which may provide a
+    -- way to act on triggers announced by an event)
   }
   deriving stock Generic
   deriving anyclass (ToJSON, FromJSON)
 
--- | A specification for a *trigger* event: an event that will be reacted to to
--- trigger a certain action by a listening process.
+-- | A specification for a *trigger* event. A *trigger* event is a normal
+-- event, still sent using the 'event' combinator (typically published on
+-- @'trigger'/...@).
 --
--- A trigger event must still form a transaction, with a start/end. The
--- @trigger/.../start@ MQTT event requests the triggered action to be
--- performed, whereas the @trigger/.../finished@ MQTT event indicates the
--- triggered action was performed successfully.
+-- An announced 'Trigger' should intent that the announcing process, or one it
+-- knows of, will be listening to the given trigger topic and will react to
+-- that event, performing some desired follow up action, and hopefully sending
+-- a reaction event with @reacted ?~ <id>@.
 --
--- The difference to the typical non-trigger events is that the /start and
--- /finish events will be sent by difference processes! The process triggering
--- the event will send a /start. The process listening for that trigger and
--- performing it will post the /finish after performing the action.
---
--- This does indeed mean there may be more than one /finish for the same /start
--- event, potentially with different results, signifying the /start event was
--- interpreted by more than one party.
+-- Events published in reply to this trigger are identified by the @replyTo@
+-- field of the @EvtMsg@, and an expected number of replies may be specified in
+-- the rules.
 data Trigger = Trigger
   { triggerTopic :: Topic
     -- ^ What topic to send this *trigger* event to
   , triggerLabel :: String
     -- ^ A label describing the trigger action
   , triggerData  :: Maybe Value
-    -- ^ The data to use send as the 'content' of the 'EvtMsg' constructed for
-    -- the trigger event. This data will be used by the listening party to act
-    -- on the trigger.
+    -- ^ The data to send as the 'content' of the 'EvtMsg' constructed for the
+    -- trigger event. This data will be used by the listening party to react to
+    -- the trigger.
+    --
+    -- TODO: We say data template because some fields may come in pre-filled vs
+    -- expecting user input? Consider JSONSchema
   }
+  deriving stock Generic
+  deriving anyclass (ToJSON, FromJSON)
 
 done, failed :: String -> r -> (EvtDone, r)
-done   msg r = (EvtDone msg True Nothing, r)
-failed msg r = (EvtDone msg False Nothing, r)
+done   msg r = (EvtDone msg True Nothing Nothing, r)
+failed msg r = (EvtDone msg False Nothing Nothing, r)
 
 withResult :: (FromJSON m, ToJSON m) => Lens' (EvtDone, r) (Maybe m)
 withResult = lens (\(s,_) -> join (res . fromJSON <$> s.result))
@@ -223,6 +242,9 @@ withResult = lens (\(s,_) -> join (res . fromJSON <$> s.result))
   where
     res (Error _)   = Nothing
     res (Success v) = Just v
+
+withTriggers :: Lens' (EvtDone, r) (Maybe [Trigger])
+withTriggers = lens (\(s,_) -> s.triggers) (\(s,r) b -> (s{triggers = b}, r))
 
 -- ** Rules --------------------------------------------------------------------
 
@@ -237,7 +259,7 @@ data Rules = Rules
   , subtasks :: Maybe [String]
     -- ^ There must be at least one matching sub-event per entry on the list,
     -- where the @String@ must match the suffix of the topic (whose prefix is
-    -- this event's topic) and the sub-event scope must match this event's
+    -- this event's topic) and the sub-event @scope@ must match this event's
     -- correlation-id.
     --
     -- That is, for @[t1, t2, t3]@, we expect at least three events scoped
@@ -245,6 +267,11 @@ data Rules = Rules
     -- @event c (msg & scoped ?~ <this_event>) t{1,2,3} ...@
     --
     -- There may be additional sub-events, as long as each of the listed ones has a match.
+  , reactions :: Maybe [Filter]
+    -- ^ There must be at least one matching event that comes as a reaction to
+    -- this event per entry on the list. These "reply" events must have a
+    -- @react@ field matching this event's correlation-id. Each @Filter@ must
+    -- @'match'@ the topic the reply is sent under.
   , critical :: Bool
     -- ^ A rule validation engine must warn critically (CRITICAL FAILURE) if
     -- any of the rules are violated when @critical = True@
@@ -306,9 +333,15 @@ event (Conn mc conn_base) edt topic k = do
 #else
     , result   = Just (toJSON $ displayException e)
 #endif
+    , triggers = Nothing
     }
+
+-- react :: Conn -> Topic -> (EventId -> IO (EvtDone, r)) -> IO r
+-- react (Conn mc conn_base) topic k = do
 
 --------------------------------------------------------------------------------
 
-instance ToJSON   Topic where toJSON    = toJSON . unTopic
-instance FromJSON Topic where parseJSON = withText "Topic" $ pure . fromJust . mkTopic
+instance ToJSON   Topic  where toJSON    = toJSON . unTopic
+instance FromJSON Topic  where parseJSON = withText "Topic" $ pure . fromJust . mkTopic
+instance ToJSON   Filter where toJSON    = toJSON . unFilter
+instance FromJSON Filter where parseJSON = withText "Topic" $ pure . fromJust . mkFilter
