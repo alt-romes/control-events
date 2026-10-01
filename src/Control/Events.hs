@@ -11,7 +11,8 @@ module Control.Events
   , EventId(..), Timed(..)
   , EvtMsg(..), simple
   , scoped, reacted, withMsg
-  , EvtDone(..), done, failed
+  , EvtDone(..), Trigger(..)
+  , done, failed
   , withResult, withTriggers
 
   -- ** Rules
