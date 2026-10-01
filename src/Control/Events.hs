@@ -111,8 +111,8 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
 -- | The content for a thread to periodically send a healthcheck event.
 -- Usage: @forkIO (healthcheckThread ...)@
 healthcheckThread :: ToJSON m => Integer {-^ Ping frequency in seconds -} -> EvtMsg m -> Topic -> IO ()
-healthcheckThread delay_secs msg0 topic = do
-  withConn healthcheck \c ->
+healthcheckThread delay_secs msg0 topic = forever do
+  _ <- try @SomeException $ withConn healthcheck \c -> do
     forever do
       let msg = msg0 & evtExpected ?~ fromInteger delay_secs
                      & evtTimeout  .~ 30
@@ -120,6 +120,11 @@ healthcheckThread delay_secs msg0 topic = do
       event c msg topic \_ -> pure (done "" ())
 
       threadDelay (fromInteger delay_secs*1_000_000) -- microseconds
+
+  -- If the `withConn` conn fails (e.g. computer sleeps and the connection
+  -- times out), then we don't want this thread to die. Just wait a little and
+  -- try again.
+  threadDelay (fromInteger delay_secs*1_000_000)
 
 --------------------------------------------------------------------------------
 
