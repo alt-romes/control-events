@@ -35,6 +35,14 @@ let
             proxying to the same target. Required if proxyTo is not null.
             '';
         };
+        bridge2 = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = ''
+            Whether to additionally bridge events from the `proxyTo` target
+            back into this node.
+            '';
+        };
         package = lib.mkOption {
           type = lib.types.package;
           default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
@@ -58,7 +66,7 @@ in
         {
           nixpkgs.pkgs = pkgs;
           services.control-events-node = {
-            inherit (cfg) enable proxyTo listenOn nodeId;
+            inherit (cfg) enable proxyTo listenOn nodeId bridge2;
           };
         }
       ];
@@ -146,11 +154,11 @@ in
           (simpl_listen cfg.listenOn); # should be a private ip
 
         # Bridges specify how to connect multiple MQTT brokers together
-        # In our case, we always proxy topics out
+        # In our case, we always proxy topics out, and optionally in
         bridges = lib.mkIf (cfg.proxyTo != null) {
           "proxy_to" = {
             addresses = [{ address = cfg.proxyTo; }];
-            topics = [ "# out 2" ];
+            topics = [ "# out 2" ] ++ lib.optional cfg.bridge2 "# in 2";
             settings = {
               cleansession = false;
               remote_clientid = cfg.nodeId;
