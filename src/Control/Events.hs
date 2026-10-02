@@ -446,9 +446,12 @@ react (Conn mc _conn_base handlersRef) f h = bracket sub unsub (\() -> waitForCl
 reactOnce :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> IO ()) -> IO ()
 reactOnce mc f h = do
   w <- newEmptyMVar
-  withAsync (react mc f (\i m -> h i m >> putMVar w ())) $ \rct -> do
-    takeMVar w -- handled message once!
-    cancel rct
+  race (react mc f (\i m -> void (tryPutMVar w (i, m)))) -- tryPutMVar: the first msg handler succeeds, the others ignore it
+       (takeMVar w) >>= \case
+    Left ()      -- react finished before the handler ran:
+      -> fail "reactOnce: disconnected or canceled before receiving a message"
+    Right (i, m) -- handler ran and stored the first message:
+      -> h i m
 
 -- * Instances -----------------------------------------------------------------
 
