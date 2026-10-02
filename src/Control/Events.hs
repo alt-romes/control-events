@@ -31,6 +31,8 @@ module Control.Events
   , module Lens.Micro
   ) where
 
+import qualified Data.List.NonEmpty as NE
+import Data.Semigroup
 import Data.Either
 import Data.IORef
 import Data.Maybe
@@ -131,12 +133,15 @@ globalMsgCallback handlersRef = SimpleCallback $ \_c topic msg props -> do
        , [i]       <- mapMaybe corrData props
        , Just uuid <- UUID.fromLazyASCIIBytes i
        , Just (Timed _ emsg) <- decode @(Timed (EvtMsg m)) msg
-       -> handler (EventId uuid topic) emsg
+       -> handler (EventId uuid (dropFin topic)) emsg
        | otherwise
        -> pure ()
   where
     corrData (PropCorrelationData i) = Just i
     corrData _                       = Nothing
+
+    -- drop "/finished" from the topic, that doesn't belong in the ID.
+    dropFin = sconcat . NE.fromList . init . split
 
 
 -- | The content for a thread to periodically send a healthcheck event.
@@ -381,11 +386,12 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 
 -- * Subscribing ---------------------------------------------------------------
 
--- | Block waiting for messages under this topic, forever, until the broker disconnects.
+-- | Block waiting for "finished" events under this topic, forever, until the broker disconnects.
+-- Reacting to "start"ed but unfinished events is not supported.
 --
 -- For every message that arrives matching this 'Filter', try to decode it as
 -- an @EvtMsg m@ and pass it to the given handler. If decoding fails, the msg
--- is ignored.
+-- is ignored. The "finished" segment to the event is added by 'react'.
 --
 -- To react to multiple topics you can run 'react' under 'withAsync': you spawn
 -- multiple 'react's asynchronously and wait for all (or some) of them at the
@@ -416,7 +422,7 @@ react (Conn mc _conn_base handlersRef) f h = bracket sub unsub (\() -> waitForCl
   where
     sub = do
       atomicModifyIORef' handlersRef (\m -> (Map.insert f (SomeMsgHandler h) m, ()))
-      (merrs, _) <- subscribe mc [(f, sub_opts)] []
+      (merrs, _) <- subscribe mc [(f <> "finished", sub_opts)] []
       case lefts merrs of
         []   -> pure ()
         errs -> fail (show errs)
@@ -425,7 +431,7 @@ react (Conn mc _conn_base handlersRef) f h = bracket sub unsub (\() -> waitForCl
       atomicModifyIORef' handlersRef (\m -> (Map.delete f m, ()))
       hasConn <- isConnected mc
       when hasConn $ do
-        _ <- unsubscribe mc [f] []
+        _ <- unsubscribe mc [f <> "finished"] []
         pure ()
 
     sub_opts = SubOptions
