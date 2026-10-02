@@ -9,7 +9,7 @@ module Control.Events
 
   -- * Running tasks delimited by events
   , event, event_
-  , react
+  , react, reactOnce
   , EventId(..), Timed(..)
   , EvtMsg(..), simple
   , scoped, reacted, withMsg
@@ -36,6 +36,7 @@ import Data.IORef
 import Data.Maybe
 import Data.Time.Clock
 import GHC.Generics
+import Control.Concurrent.Async
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
@@ -433,6 +434,15 @@ react (Conn mc _conn_base handlersRef) f h = bracket sub unsub (\() -> waitForCl
       , _noLocal = True -- don't receive your own messages
       , _subQoS = QoS2  -- msgs published as QoS2 can be sent from the broker to us with QoS2 too
       }
+
+-- | Block waiting to 'react' exactly once to one message matching this filter
+-- and then unsubscribe, unregister the handler, and resume.
+reactOnce :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> IO ()) -> IO ()
+reactOnce mc f h = do
+  w <- newEmptyMVar
+  withAsync (react mc f (\i m -> h i m >> putMVar w ())) $ \rct -> do
+    takeMVar w -- handled message once!
+    cancel rct
 
 -- * Instances -----------------------------------------------------------------
 
