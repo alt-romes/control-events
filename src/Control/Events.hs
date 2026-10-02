@@ -71,7 +71,7 @@ data Conn = Conn
   { connClient    :: MQTTClient
   , connBaseTopic :: Topic
   , connHandlers  :: IORef (Map.Map Filter MsgHandler)
-  , connPendingTx :: IORef (Map.Map UUID.UUID (EvtDone -> IO ()))
+  , connPendingTx :: IORef (Map.Map (UUID.UUID, Filter) (EvtDone -> IO ()))
     -- ^ We can only react to completed transactions.
     -- When we receive a /start we insert the event in the map with correlation
     -- id and the IO action that runs the handler. On /finished, we pop it from
@@ -79,6 +79,11 @@ data Conn = Conn
     --
     -- We additionally evacuate pending transactions from this map when they
     -- timeout.
+    --
+    -- If there are two overlapping handlers (e.g. for trigger/# and
+    -- trigger/something), they will handle the same message. Therefore, the
+    -- map key must also include the handler filter, since otherwise the two
+    -- messages would collapse into just one on the pending map.
   }
 
 data MsgHandler = forall m. FromJSON m => SomeMsgHandler (EventId -> EvtMsg m -> EvtDone -> IO ())
@@ -158,18 +163,18 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
                   -- On event timeout, remove pending action from map
                   timeout_tid <- forkIO $ do
                     threadDelay ((emsg.rules.timeout + 30)*1_000_000)
-                    modifyPending (Map.delete uuid)
+                    modifyPending (Map.delete (uuid, filt))
 
-                  modifyPending $ Map.insert uuid $ \edn -> do
+                  modifyPending $ Map.insert (uuid, filt) $ \edn -> do
                     killThread timeout_tid          -- cancel timeout
-                    modifyPending (Map.delete uuid) -- no longer pending
+                    modifyPending (Map.delete (uuid, filt)) -- no longer pending
                     handler (EventId uuid (txnTopic topic)) emsg edn
 
                | "finished" <- termin
                , Just (Timed _ edn) <- decode @(Timed EvtDone) msg
                -> do
                   pnd <- readIORef pending
-                  case Map.lookup uuid pnd of
+                  case Map.lookup (uuid, filt) pnd of
                     Just act -> act edn
                     Nothing  -> pure () -- ignore
                | otherwise
