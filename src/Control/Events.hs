@@ -32,6 +32,7 @@ module Control.Events
   ) where
 
 import qualified Data.List.NonEmpty as NE
+import qualified Data.List as L
 import Data.Semigroup
 import Data.Either
 import Data.IORef
@@ -66,9 +67,21 @@ trigger = fromJust (mkTopic "trigger")
 -- * Connection ----------------------------------------------------------------
 
 -- | A connection to send events to the broker for a particular service
-data Conn = Conn MQTTClient Topic (IORef (Map.Map Filter MsgHandler))
+data Conn = Conn
+  { connClient    :: MQTTClient
+  , connBaseTopic :: Topic
+  , connHandlers  :: IORef (Map.Map Filter MsgHandler)
+  , connPendingTx :: IORef (Map.Map UUID.UUID (EvtDone -> IO ()))
+    -- ^ We can only react to completed transactions.
+    -- When we receive a /start we insert the event in the map with correlation
+    -- id and the IO action that runs the handler. On /finished, we pop it from
+    -- the map and actually run the handler.
+    --
+    -- We additionally evacuate pending transactions from this map when they
+    -- timeout.
+  }
 
-data MsgHandler = forall m. FromJSON m => SomeMsgHandler (EventId -> EvtMsg m -> IO ())
+data MsgHandler = forall m. FromJSON m => SomeMsgHandler (EventId -> EvtMsg m -> EvtDone -> IO ())
 
 -- | Open a connection to the broker for this service to send events.
 -- The 'Topic' argument is used as the base topic for events sent within this
@@ -94,11 +107,12 @@ withPersistentConn
 withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker where
   connectBroker = do
     handlersRef <- newIORef Map.empty
+    pendingRef  <- newIORef Map.empty
     let
       Just uri = parseURI $ "mqtt://127.0.0.1" ++ maybe "" ('#':) mbyID
                   -- the _connID is parsed from the URI on `connectURI`.
       config = mqttConfig
-        { _msgCB = globalMsgCallback handlersRef
+        { _msgCB = globalMsgCallback handlersRef pendingRef
         , _cleanSession = case mbyID of
               Nothing -> True  -- no persistence, do clean session
               Just _  -> False -- keep msgs the meant for a client which is offline
@@ -119,30 +133,57 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
         , _connID   = fromMaybe "" mbyID -- is always overwritten by the #<id> in the URI.
         }
     mc <- connectURI config uri
-    pure (Conn mc serviceTopic handlersRef)
+    pure Conn
+      { connClient    = mc
+      , connBaseTopic = serviceTopic
+      , connHandlers  = handlersRef
+      , connPendingTx = pendingRef
+      }
 
   -- must send DISCONNECT before exiting, otherwise LWT triggers
-  disconnectBroker (Conn mc _ _) = normalDisconnect mc
+  disconnectBroker Conn{connClient} = normalDisconnect connClient
 
-globalMsgCallback :: IORef (Map.Map Filter MsgHandler) -> MessageCallback
-globalMsgCallback handlersRef = SimpleCallback $ \_c topic msg props -> do
-  hs <- readIORef handlersRef
-  -- Try all the handlers
-  forM_ (Map.toList hs) $ \(filt, SomeMsgHandler @m handler) ->
-    if | match filt topic
-       , [i]       <- mapMaybe corrData props
-       , Just uuid <- UUID.fromLazyASCIIBytes i
-       , Just (Timed _ emsg) <- decode @(Timed (EvtMsg m)) msg
-       -> handler (EventId uuid (dropFin topic)) emsg
-       | otherwise
-       -> pure ()
-  where
-    corrData (PropCorrelationData i) = Just i
-    corrData _                       = Nothing
+  globalMsgCallback handlers pending = SimpleCallback $ \_c topic msg props -> do
+    hs <- readIORef handlers
+    -- Try all the handlers
+    forM_ (Map.toList hs) $ \(filt, SomeMsgHandler @m handler) ->
+      if | match filt (txnTopic topic)
+         , [i]       <- mapMaybe corrData props
+         , Just uuid <- UUID.fromLazyASCIIBytes i
+         , let termin = last (split topic)
+         -> if | "start" <- termin
+               , Just (Timed _ emsg) <- decode @(Timed (EvtMsg m)) msg
+               -> do
+                  -- On event timeout, remove pending action from map
+                  tid <- forkIO $ do
+                    threadDelay ((emsg.rules.timeout + 30)*1_000_000)
+                    modifyPending (Map.delete uuid)
 
-    -- drop "/finished" from the topic, that doesn't belong in the ID.
-    dropFin = sconcat . NE.fromList . init . split
+                  modifyPending $ Map.insert uuid $ \edn -> do
+                    killThread tid                  -- cancel timeout
+                    modifyPending (Map.delete uuid) -- no longer pending
+                    handler (EventId uuid (txnTopic topic)) emsg edn
 
+               | "finished" <- termin
+               , Just (Timed _ edn) <- decode @(Timed EvtDone) msg
+               -> do
+                  pnd <- readIORef pending
+                  case Map.lookup uuid pnd of
+                    Just act -> act edn
+                    Nothing  -> pure () -- ignore
+               | otherwise
+               -> pure ()
+
+         | otherwise
+         -> pure ()
+    where
+      corrData (PropCorrelationData i) = Just i
+      corrData _                       = Nothing
+
+      -- drop "/{start,finished}" from the topic
+      txnTopic = sconcat . NE.fromList . init . split
+
+      modifyPending f = atomicModifyIORef' pending (\pm -> (f pm, ()))
 
 -- | The content for a thread to periodically send a healthcheck event.
 -- Usage: @forkIO (healthcheckThread ...)@
@@ -338,7 +379,7 @@ evtCritical = lens (\s -> s.rules.critical) (\s b -> s{rules = s.rules{critical 
 
 -- | Send a delimited "transactional" event
 event :: (ToJSON m) => Conn -> Topic -> EvtMsg m -> (EventId -> IO (EvtDone, r)) -> IO r
-event (Conn mc conn_base _) topic edt k = do
+event (Conn mc conn_base _ _) topic edt k = do
   mask $ \restore -> do
     eid <- startEvent
     (dn, r)
@@ -386,12 +427,15 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 
 -- * Subscribing ---------------------------------------------------------------
 
--- | Block waiting for "finished" events under this topic, forever, until the broker disconnects.
--- Reacting to "start"ed but unfinished events is not supported.
+-- | Block waiting for "completed" events under this topic, forever, until the
+-- broker disconnects. The handler will be run for matching topics whenever a
+-- pair @.../start@ + @.../finished@ is received. Reacting to a started (but
+-- unfinished) event is not supported. You can only react to completed
+-- transactional events.
 --
 -- For every message that arrives matching this 'Filter', try to decode it as
 -- an @EvtMsg m@ and pass it to the given handler. If decoding fails, the msg
--- is ignored. The "finished" segment to the event is added by 'react'.
+-- is ignored.
 --
 -- To react to multiple topics you can run 'react' under 'withAsync': you spawn
 -- multiple 'react's asynchronously and wait for all (or some) of them at the
@@ -399,7 +443,8 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 --
 -- Example of subscribing to two topics:
 -- @
--- concurrently (react c t1 (\(x::EvtMsg MyData) -> ...)) (react c t2 (\y::EvtMsg OtherData) -> ...)
+-- concurrently (react c t1 (\(x::EvtMsg MyData) -> ...))
+--              (react c t2 ((\y::EvtMsg OtherData) -> ...))
 -- @
 --
 -- It is safe to call 'react' many times, and from various threads. All
@@ -417,12 +462,12 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 -- react to topics outside of the base topic we're publishing at. For instance,
 -- we may want to react to @trigger/finances/gen-invoice@ from a process
 -- publishing under a @script/finances@ topic)
-react :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> IO ()) -> IO ()
-react (Conn mc _conn_base handlersRef) f h = bracket sub unsub (\() -> waitForClient mc)
+react :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> EvtDone -> IO ()) -> IO ()
+react (Conn mc _conn_base handlersRef _) f h = bracket sub unsub (\() -> waitForClient mc)
   where
     sub = do
       atomicModifyIORef' handlersRef (\m -> (Map.insert f (SomeMsgHandler h) m, ()))
-      (merrs, _) <- subscribe mc [(f <> "finished", sub_opts)] []
+      (merrs, _) <- subscribe mc (map (,sub_opts) tfs) []
       case lefts merrs of
         []   -> pure ()
         errs -> fail (show errs)
@@ -431,8 +476,14 @@ react (Conn mc _conn_base handlersRef) f h = bracket sub unsub (\() -> waitForCl
       atomicModifyIORef' handlersRef (\m -> (Map.delete f m, ()))
       hasConn <- isConnected mc
       when hasConn $ do
-        _ <- unsubscribe mc [f <> "finished"] []
+        _ <- unsubscribe mc tfs []
         pure ()
+
+    tfs
+      | Just (_, "#") <- L.unsnoc (split f)
+      = [f] -- already matches .../start and .../finished
+      | otherwise
+      = [f <> "start", f <> "finished"]
 
     sub_opts = SubOptions
       { _retainHandling = SendOnSubscribe -- on subscribe, receive all retained messages always
@@ -443,15 +494,15 @@ react (Conn mc _conn_base handlersRef) f h = bracket sub unsub (\() -> waitForCl
 
 -- | Block waiting to 'react' exactly once to one message matching this filter
 -- and then unsubscribe, unregister the handler, and resume.
-reactOnce :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> IO ()) -> IO ()
+reactOnce :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> EvtDone -> IO ()) -> IO ()
 reactOnce mc f h = do
   w <- newEmptyMVar
-  race (react mc f (\i m -> void (tryPutMVar w (i, m)))) -- tryPutMVar: the first msg handler succeeds, the others ignore it
+  race (react mc f (\i m d -> void (tryPutMVar w (i, m, d)))) -- tryPutMVar: the first msg handler succeeds, the others ignore it
        (takeMVar w) >>= \case
     Left ()      -- react finished before the handler ran:
       -> fail "reactOnce: disconnected or canceled before receiving a message"
-    Right (i, m) -- handler ran and stored the first message:
-      -> h i m
+    Right (i, m, d) -- handler ran and stored the first message:
+      -> h i m d
 
 -- * Instances -----------------------------------------------------------------
 
