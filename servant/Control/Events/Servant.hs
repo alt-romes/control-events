@@ -17,3 +17,5 @@ eventH conn msg topic k = MkHandler $ do
                       & withResult .~ Just (show serr)
       Right x   -> second Right x
 
+eventH_ :: ToJSON m => Conn -> EvtMsg m -> Topic -> (EventId -> Handler a) -> Handler a
+eventH_ conn msg topic k = eventH conn msg topic (\e -> done "OK" <$> k e)
