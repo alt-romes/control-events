@@ -71,7 +71,7 @@ data Conn = Conn
   { connClient    :: MQTTClient
   , connBaseTopic :: Topic
   , connHandlers  :: IORef (Map.Map Filter MsgHandler)
-  , connPendingTx :: IORef (Map.Map (UUID.UUID, Filter) (EvtDone -> IO ()))
+  , connPendingTx :: IORef (Map.Map (UUID.UUID, Filter) PendingTxn)
     -- ^ We can only react to completed transactions.
     -- When we receive a /start we insert the event in the map with correlation
     -- id and the IO action that runs the handler. On /finished, we pop it from
@@ -87,6 +87,27 @@ data Conn = Conn
   }
 
 data MsgHandler = forall m. FromJSON m => SomeMsgHandler (EventId -> EvtMsg m -> EvtDone -> IO ())
+
+-- | A pending transaction is waiting for the other half of the transaction.
+-- Typically, /start comes first, but a /finished may arrive first because of
+-- out of order delivery from the broker across topics or the unordered
+-- SimpleCallback (the non-blocking call-back type we use, rather than
+-- OrderedCallback which raises complicated questions about deadlocks due to
+-- how it orders requests)
+data PendingTxn
+  -- | A transaction .../start, waiting for the .../finished event.
+  -- Captures the handler action that is only missing an 'EvtDone' to run.
+  --
+  -- This transaction will be cleared from the map if its pair doesn't arrive
+  -- within the rules timeout for this event.
+  = PendingStart (EvtDone -> IO ())
+  -- | A .../finished event arrived before the /start. Hold on to the 'EvtDone'
+  -- and run the handler when the /start arrives.
+  --
+  -- This transaction is cleared if the pair doesn't arrive within a short
+  -- amount of time. We expect it to be available very soon after start if it's
+  -- simply caused by an out-of-order issue.
+  | PendingFinished EvtDone
 
 -- | Open a connection to the broker for this service to send events.
 -- The 'Topic' argument is used as the base topic for events sent within this
@@ -148,8 +169,7 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
   -- must send DISCONNECT before exiting, otherwise LWT triggers
   disconnectBroker Conn{connClient} = normalDisconnect connClient
 
-  -- must use ordered callback to match /start + /finished events in that order.
-  globalMsgCallback handlers pending = OrderedCallback $ \_c topic msg props -> do
+  globalMsgCallback handlers pending = SimpleCallback $ \_c topic msg props -> do
     hs <- readIORef handlers
     -- Try all the handlers
     forM_ (Map.toList hs) $ \(filt, SomeMsgHandler @m handler) ->
@@ -159,30 +179,41 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
          , let termin = last (split topic)
          -> if | "start" <- termin
                , Just (Timed _ emsg) <- decode @(Timed (EvtMsg m)) msg
-               -> do
-                  -- On event timeout, remove pending action from map
-                  timeout_tid <- forkIO $ do
-                    threadDelay ((emsg.rules.timeout + 30)*1_000_000)
-                    modifyPending (Map.delete (uuid, filt))
-
-                  modifyPending $ Map.insert (uuid, filt) $ \edn -> do
-                    killThread timeout_tid          -- cancel timeout
-                    modifyPending (Map.delete (uuid, filt)) -- no longer pending
-                    handler (EventId uuid (txnTopic topic)) emsg edn
+               -> pair (uuid, filt) (emsg.rules.timeout + 30) -- expected /finished according to rules.timeout
+                       (PendingStart (handler (EventId uuid (txnTopic topic)) emsg))
 
                | "finished" <- termin
                , Just (Timed _ edn) <- decode @(Timed EvtDone) msg
-               -> do
-                  pnd <- readIORef pending
-                  case Map.lookup (uuid, filt) pnd of
-                    Just act -> act edn
-                    Nothing  -> pure () -- ignore
+               -> pair (uuid, filt) 30 -- expect /start very soon after /finished
+                       (PendingFinished edn)
+
                | otherwise
                -> pure ()
 
          | otherwise
          -> pure ()
     where
+      pair (uuid, filt) timeout ptxn = do
+        pnd <- readIORef pending
+        case Map.lookup (uuid, filt) pnd of
+          Nothing -- ptxn is the first half
+            -> do
+              -- Remove this entry from the map after the timeout.
+              -- This will clear the map both in the case the txn never
+              -- completes and in the case it does (as long as the match
+              -- arrives and looks up its other half before the timeout).
+              _ <- forkIO $ do
+                threadDelay (timeout*1_000_000)
+                modifyPending (Map.delete (uuid, filt))
+              modifyPending (Map.insert (uuid, filt) ptxn)
+          Just (PendingStart act)
+            | PendingFinished dn <- ptxn
+            -> act dn
+          Just (PendingFinished dn)
+            | PendingStart act <- ptxn
+            -> act dn
+          _ -> pure () -- duplicate finish; impossible with QoS2, but ignore.
+
       corrData (PropCorrelationData i) = Just i
       corrData _                       = Nothing
 
