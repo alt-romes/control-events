@@ -1,4 +1,5 @@
-{-# LANGUAGE BlockArguments, CPP, OverloadedStrings, OverloadedRecordDot, DeriveAnyClass #-}
+{-# LANGUAGE TypeAbstractions, MultiWayIf, BlockArguments, CPP,
+             OverloadedStrings, OverloadedRecordDot, DeriveAnyClass #-}
 {-# OPTIONS_GHC -Wno-orphans #-} -- JSON Topic
 module Control.Events
   (
@@ -8,6 +9,7 @@ module Control.Events
 
   -- * Running tasks delimited by events
   , event, event_
+  , react
   , EventId(..), Timed(..)
   , EvtMsg(..), simple
   , scoped, reacted, withMsg
@@ -29,6 +31,7 @@ module Control.Events
   , module Lens.Micro
   ) where
 
+import Data.Either
 import Data.IORef
 import Data.Maybe
 import Data.Time.Clock
@@ -41,6 +44,8 @@ import Lens.Micro
 import Network.URI (parseURI)
 import Network.MQTT.Client
 import Network.MQTT.Topic
+import Network.MQTT.Types (RetainHandling(..))
+import qualified Data.Map as Map
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import qualified Data.Text.Encoding as T
@@ -55,13 +60,12 @@ server = fromJust (mkTopic "server")
 healthcheck = fromJust (mkTopic "healthcheck")
 trigger = fromJust (mkTopic "trigger")
 
-
 -- * Connection ----------------------------------------------------------------
 
 -- | A connection to send events to the broker for a particular service
-data Conn = Conn MQTTClient Topic (IORef MsgHandler)
+data Conn = Conn MQTTClient Topic (IORef (Map.Map Filter MsgHandler))
 
-type MsgHandler = Topic -> LBS.ByteString -> [Property] -> IO ()
+data MsgHandler = forall m. FromJSON m => SomeMsgHandler (EventId -> EvtMsg m -> IO ())
 
 -- | Open a connection to the broker for this service to send events.
 -- The 'Topic' argument is used as the base topic for events sent within this
@@ -86,12 +90,12 @@ withPersistentConn
   -> IO r
 withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker where
   connectBroker = do
-    handlerRef <- newIORef (\_t _m _p -> pure ())
+    handlersRef <- newIORef Map.empty
     let
       Just uri = parseURI $ "mqtt://127.0.0.1" ++ maybe "" ('#':) mbyID
                   -- the _connID is parsed from the URI on `connectURI`.
       config = mqttConfig
-        { _msgCB=SimpleCallback (\_c t m p -> readIORef handlerRef >>= \f -> f t m p)
+        { _msgCB = globalMsgCallback handlersRef
         , _cleanSession = case mbyID of
               Nothing -> True  -- no persistence, do clean session
               Just _  -> False -- keep msgs the meant for a client which is offline
@@ -112,10 +116,27 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
         , _connID   = fromMaybe "" mbyID -- is always overwritten by the #<id> in the URI.
         }
     mc <- connectURI config uri
-    pure (Conn mc serviceTopic handlerRef)
+    pure (Conn mc serviceTopic handlersRef)
 
   -- must send DISCONNECT before exiting, otherwise LWT triggers
   disconnectBroker (Conn mc _ _) = normalDisconnect mc
+
+globalMsgCallback :: IORef (Map.Map Filter MsgHandler) -> MessageCallback
+globalMsgCallback handlersRef = SimpleCallback $ \_c topic msg props -> do
+  hs <- readIORef handlersRef
+  -- Try all the handlers
+  forM_ (Map.toList hs) $ \(filt, SomeMsgHandler @m handler) ->
+    if | match filt topic
+       , [i]       <- mapMaybe corrData props
+       , Just uuid <- UUID.fromLazyASCIIBytes i
+       , Just emsg <- decode @(EvtMsg m) msg
+       -> handler (EventId uuid topic) emsg
+       | otherwise
+       -> pure ()
+  where
+    corrData (PropCorrelationData i) = Just i
+    corrData _                       = Nothing
+
 
 -- | The content for a thread to periodically send a healthcheck event.
 -- Usage: @forkIO (healthcheckThread ...)@
@@ -359,10 +380,59 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 
 -- * Subscribing ---------------------------------------------------------------
 
--- |
--- react :: FromJSON m => Conn -> Topic -> (EvtMsg m -> IO (EvtDone, r)) -> IO r
--- react (Conn mc conn_base) topic k = do
+-- | Block waiting for messages under this topic, forever, until the broker disconnects.
+--
+-- For every message that arrives matching this 'Filter', try to decode it as
+-- an @EvtMsg m@ and pass it to the given handler. If decoding fails, the msg
+-- is ignored.
+--
+-- To react to multiple topics you can run 'react' under 'withAsync': you spawn
+-- multiple 'react's asynchronously and wait for all (or some) of them at the
+-- end.
+--
+-- Example of subscribing to two topics:
+-- @
+-- concurrently (react c t1 (\(x::EvtMsg MyData) -> ...)) (react c t2 (\y::EvtMsg OtherData) -> ...)
+-- @
+--
+-- It is safe to call 'react' many times, and from various threads. All
+-- handlers will be registered and messages delegated to the corresponding
+-- handler.
+--
+-- Registering two handlers for the same topic is not supported and is
+-- considered UB.
+--
+-- If 'react' is canceled or the broker disconnects, the handler will be
+-- unregistered and we'll unsubscribe further messages on this topic to the
+-- broker (if it is still connected).
+--
+-- (The 'withConn' "base topic" is unused in 'react', since we may want to
+-- react to topics outside of the base topic we're publishing at. For instance,
+-- we may want to react to @trigger/finances/gen-invoice@ from a process
+-- publishing under a @script/finances@ topic)
+react :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> IO ()) -> IO ()
+react (Conn mc _conn_base handlersRef) f h = bracket sub unsub (\() -> waitForClient mc)
+  where
+    sub = do
+      atomicModifyIORef' handlersRef (\m -> (Map.insert f (SomeMsgHandler h) m, ()))
+      (merrs, _) <- subscribe mc [(f, sub_opts)] []
+      case lefts merrs of
+        []   -> pure ()
+        errs -> fail (show errs)
 
+    unsub () = do
+      atomicModifyIORef' handlersRef (\m -> (Map.delete f m, ()))
+      hasConn <- isConnected mc
+      when hasConn $ do
+        _ <- unsubscribe mc [f] []
+        pure ()
+
+    sub_opts = SubOptions
+      { _retainHandling = SendOnSubscribe -- on subscribe, receive all retained messages always
+      , _retainAsPublished = False -- default
+      , _noLocal = True -- don't receive your own messages
+      , _subQoS = QoS2  -- msgs published as QoS2 can be sent from the broker to us with QoS2 too
+      }
 
 -- * Instances -----------------------------------------------------------------
 
