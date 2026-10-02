@@ -130,7 +130,7 @@ globalMsgCallback handlersRef = SimpleCallback $ \_c topic msg props -> do
     if | match filt topic
        , [i]       <- mapMaybe corrData props
        , Just uuid <- UUID.fromLazyASCIIBytes i
-       , Just emsg <- decode @(EvtMsg m) msg
+       , Just (Timed _ emsg) <- decode @(Timed (EvtMsg m)) msg
        -> handler (EventId uuid topic) emsg
        | otherwise
        -> pure ()
