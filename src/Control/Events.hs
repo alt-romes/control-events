@@ -143,7 +143,8 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
   -- must send DISCONNECT before exiting, otherwise LWT triggers
   disconnectBroker Conn{connClient} = normalDisconnect connClient
 
-  globalMsgCallback handlers pending = SimpleCallback $ \_c topic msg props -> do
+  -- must use ordered callback to match /start + /finished events in that order.
+  globalMsgCallback handlers pending = OrderedCallback $ \_c topic msg props -> do
     hs <- readIORef handlers
     -- Try all the handlers
     forM_ (Map.toList hs) $ \(filt, SomeMsgHandler @m handler) ->
@@ -155,12 +156,12 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
                , Just (Timed _ emsg) <- decode @(Timed (EvtMsg m)) msg
                -> do
                   -- On event timeout, remove pending action from map
-                  tid <- forkIO $ do
+                  timeout_tid <- forkIO $ do
                     threadDelay ((emsg.rules.timeout + 30)*1_000_000)
                     modifyPending (Map.delete uuid)
 
                   modifyPending $ Map.insert uuid $ \edn -> do
-                    killThread tid                  -- cancel timeout
+                    killThread timeout_tid          -- cancel timeout
                     modifyPending (Map.delete uuid) -- no longer pending
                     handler (EventId uuid (txnTopic topic)) emsg edn
 
