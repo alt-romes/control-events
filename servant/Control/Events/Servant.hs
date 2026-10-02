@@ -7,15 +7,15 @@ import Network.MQTT.Topic
 import Control.Events
 
 -- | Like 'event', but when in the servant 'Handler' monad
-eventH :: forall m a. ToJSON m => Conn -> EvtMsg m -> Topic
-       -> (EventId -> Handler (EvtDone, a)) -> Handler a
-eventH conn msg topic k = MkHandler $ do
-  event conn msg topic $ \ev -> do
+eventH :: forall m a. ToJSON m => Conn -> Topic
+       -> EvtMsg m -> (EventId -> Handler (EvtDone, a)) -> Handler a
+eventH conn topic msg k = MkHandler $ do
+  event conn topic msg $ \ev -> do
     r <- runHandler (k ev)
     pure $ case r of
       Left serr -> failed "Server Error" (Left serr)
                       & withResult .~ Just (show serr)
       Right x   -> second Right x
 
-eventH_ :: ToJSON m => Conn -> EvtMsg m -> Topic -> (EventId -> Handler a) -> Handler a
-eventH_ conn msg topic k = eventH conn msg topic (\e -> done "OK" <$> k e)
+eventH_ :: ToJSON m => Conn -> Topic -> EvtMsg m -> (EventId -> Handler a) -> Handler a
+eventH_ conn topic msg k = eventH conn topic msg (\e -> done "OK" <$> k e)

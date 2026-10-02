@@ -55,7 +55,7 @@ runScript :: Opts -> IO ()
 runScript o = do
   exitCode <- withConn script \c -> do
 
-    event c (msgOf o) o.topic \_ -> do
+    event c o.topic (msgOf o) \_ -> do
       (_,_,_,ph) <- createProcess (proc o.exe o.args)
         -- we can't read the output of the program without changing its
         -- behavior wrt the stdout / tty things. The stdout/err/in must remain
@@ -71,6 +71,6 @@ runScript o = do
 
 runHealthcheck :: Opts -> IO ()
 runHealthcheck o = do
-  _          <- forkIO $ healthcheckThread (fromMaybe 300 o.expected) (msgOf o) o.topic
+  _          <- forkIO $ healthcheckThread (fromMaybe 300 o.expected) o.topic (msgOf o)
   (_,_,_,ph) <- createProcess (proc o.exe o.args)
   waitForProcess ph >>= exitWith

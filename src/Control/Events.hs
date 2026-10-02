@@ -45,8 +45,8 @@ import qualified Data.UUID.V4 as UUID
 import qualified Data.Text.Encoding as T
 import qualified Data.ByteString.Lazy as LBS
 
--- todo: waitForClient wrapper, for subscribers
---------------------------------------------------------------------------------
+
+-- * Topics --------------------------------------------------------------------
 
 script, server, healthcheck, trigger :: Topic
 script = fromJust (mkTopic "script")
@@ -114,14 +114,14 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
 
 -- | The content for a thread to periodically send a healthcheck event.
 -- Usage: @forkIO (healthcheckThread ...)@
-healthcheckThread :: ToJSON m => Integer {-^ Ping frequency in seconds -} -> EvtMsg m -> Topic -> IO ()
-healthcheckThread delay_secs msg0 topic = forever do
+healthcheckThread :: ToJSON m => Integer {-^ Ping frequency in seconds -} -> Topic -> EvtMsg m -> IO ()
+healthcheckThread delay_secs topic msg0 = forever do
   _ <- try @SomeException $ withConn healthcheck \c -> do
     forever do
       let msg = msg0 & evtExpected ?~ fromInteger delay_secs
                      & evtTimeout  .~ 30
 
-      event c msg topic \_ -> pure (done "" ())
+      event c topic msg \_ -> pure (done "" ())
 
       threadDelay (fromInteger delay_secs*1_000_000) -- microseconds
 
@@ -130,7 +130,8 @@ healthcheckThread delay_secs msg0 topic = forever do
   -- try again.
   threadDelay (fromInteger delay_secs*1_000_000)
 
---------------------------------------------------------------------------------
+
+-- * Messages ------------------------------------------------------------------
 
 -- | An identifier to correlate scoped events and start/stop events
 data EventId = EventId { correlationId :: UUID.UUID, evtTopic :: Topic }
@@ -302,11 +303,12 @@ evtReactions = lens (\s -> s.rules.reactions) (\s b -> s{rules = s.rules{reactio
 evtCritical :: Lens' (EvtMsg m) Bool
 evtCritical = lens (\s -> s.rules.critical) (\s b -> s{rules = s.rules{critical = b}})
 
---------------------------------------------------------------------------------
+
+-- * Publishing ----------------------------------------------------------------
 
 -- | Send a delimited "transactional" event
-event :: (ToJSON m) => Conn -> EvtMsg m -> Topic -> (EventId -> IO (EvtDone, r)) -> IO r
-event (Conn mc conn_base) edt topic k = do
+event :: (ToJSON m) => Conn -> Topic -> EvtMsg m -> (EventId -> IO (EvtDone, r)) -> IO r
+event (Conn mc conn_base _) topic edt k = do
   mask $ \restore -> do
     eid <- startEvent
     (dn, r)
@@ -347,13 +349,19 @@ event (Conn mc conn_base) edt topic k = do
     , triggers = Nothing
     }
 
-event_ :: ToJSON m => Conn -> EvtMsg m -> Topic -> (EventId -> IO r) -> IO r
-event_ c m t k = event c m t (\e -> done "OK" <$> k e)
+-- | 'event', but the result is @'done' "OK"@ unless an exception is thrown.
+event_ :: ToJSON m => Conn -> Topic -> EvtMsg m -> (EventId -> IO r) -> IO r
+event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 
--- react :: Conn -> Topic -> (EventId -> IO (EvtDone, r)) -> IO r
+
+-- * Subscribing ---------------------------------------------------------------
+
+-- |
+-- react :: FromJSON m => Conn -> Topic -> (EvtMsg m -> IO (EvtDone, r)) -> IO r
 -- react (Conn mc conn_base) topic k = do
 
---------------------------------------------------------------------------------
+
+-- * Instances -----------------------------------------------------------------
 
 instance ToJSON   Topic  where toJSON    = toJSON . unTopic
 instance FromJSON Topic  where parseJSON = withText "Topic" $ pure . fromJust . mkTopic
