@@ -29,6 +29,7 @@ module Control.Events
   , module Lens.Micro
   ) where
 
+import Data.IORef
 import Data.Maybe
 import Data.Time.Clock
 import GHC.Generics
@@ -54,10 +55,13 @@ server = fromJust (mkTopic "server")
 healthcheck = fromJust (mkTopic "healthcheck")
 trigger = fromJust (mkTopic "trigger")
 
---------------------------------------------------------------------------------
+
+-- * Connection ----------------------------------------------------------------
 
 -- | A connection to send events to the broker for a particular service
-data Conn = Conn MQTTClient Topic
+data Conn = Conn MQTTClient Topic (IORef MsgHandler)
+
+type MsgHandler = Topic -> LBS.ByteString -> [Property] -> IO ()
 
 -- | Open a connection to the broker for this service to send events.
 -- The 'Topic' argument is used as the base topic for events sent within this
@@ -82,12 +86,13 @@ withPersistentConn
   -> IO r
 withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker where
   connectBroker = do
+    handlerRef <- newIORef (\_t _m _p -> pure ())
     let
       Just uri = parseURI $ "mqtt://127.0.0.1" ++ maybe "" ('#':) mbyID
                   -- the _connID is parsed from the URI on `connectURI`.
       config = mqttConfig
-        {
-          _cleanSession = case mbyID of
+        { _msgCB=SimpleCallback (\_c t m p -> readIORef handlerRef >>= \f -> f t m p)
+        , _cleanSession = case mbyID of
               Nothing -> True  -- no persistence, do clean session
               Just _  -> False -- keep msgs the meant for a client which is offline
         , _lwt = Just LastWill
@@ -107,10 +112,10 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
         , _connID   = fromMaybe "" mbyID -- is always overwritten by the #<id> in the URI.
         }
     mc <- connectURI config uri
-    pure (Conn mc serviceTopic)
+    pure (Conn mc serviceTopic handlerRef)
 
   -- must send DISCONNECT before exiting, otherwise LWT triggers
-  disconnectBroker (Conn mc _) = normalDisconnect mc
+  disconnectBroker (Conn mc _ _) = normalDisconnect mc
 
 -- | The content for a thread to periodically send a healthcheck event.
 -- Usage: @forkIO (healthcheckThread ...)@
