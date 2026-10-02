@@ -18,7 +18,8 @@ module Control.Events
   -- ** Rules
   , Rules(..)
   , evtTimeout, evtExpected
-  , evtSubtasks, evtCritical
+  , evtSubtasks, evtReactions
+  , evtCritical
 
   -- ** Topics
   , script, server, healthcheck, trigger
@@ -288,6 +289,9 @@ evtExpected = lens (\s -> s.rules.expected) (\s b -> s{rules = s.rules{expected 
 
 evtSubtasks :: Lens' (EvtMsg m) (Maybe [String])
 evtSubtasks = lens (\s -> s.rules.subtasks) (\s b -> s{rules = s.rules{subtasks = b}})
+
+evtReactions :: Lens' (EvtMsg m) (Maybe [Filter])
+evtReactions = lens (\s -> s.rules.reactions) (\s b -> s{rules = s.rules{reactions = b}})
 
 evtCritical :: Lens' (EvtMsg m) Bool
 evtCritical = lens (\s -> s.rules.critical) (\s b -> s{rules = s.rules{critical = b}})
