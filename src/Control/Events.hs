@@ -260,8 +260,6 @@ data Rules = Rules
   { timeout  :: Int
     -- ^ How much time in seconds to wait for a "finished" message for this
     -- "start" message before considering the service failed?
-    --
-    -- All expected replies must be published before the timeout.
   , expected :: Maybe NominalDiffTime
     -- ^ When is a next "start" message expected, at the latest, after this
     -- one, for the same topic this message was sent on?
