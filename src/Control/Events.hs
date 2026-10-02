@@ -202,6 +202,10 @@ data EvtDone = EvtDone
     -- triggered. The 'Trigger' values specify how to constructed the announced
     -- *trigger* event. (This is useful for an interface which may provide a
     -- way to act on triggers announced by an event)
+    --
+    -- Each announced trigger is only meant to be used once. It would be
+    -- surprising if there's some action we can do repeatedly but only is
+    -- announced after a certain event: we assume all triggers are one-shot.
   }
   deriving stock Generic
   deriving anyclass (ToJSON, FromJSON)
@@ -255,6 +259,8 @@ data Rules = Rules
   { timeout  :: Int
     -- ^ How much time in seconds to wait for a "finished" message for this
     -- "start" message before considering the service failed?
+    --
+    -- All expected replies must be published before the timeout.
   , expected :: Maybe NominalDiffTime
     -- ^ When is a next "start" message expected, at the latest, after this
     -- one, for the same topic this message was sent on?
