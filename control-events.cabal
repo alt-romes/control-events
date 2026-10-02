@@ -39,11 +39,11 @@ executable control-events
         control-events,
         process,
         net-mqtt,
-        optparse-generic,
+        optparse-applicative,
         time,
         text
 
     ghc-options: -threaded
     hs-source-dirs:   app
-    default-extensions: LambdaCase
+    default-extensions: LambdaCase, OverloadedRecordDot
     default-language: GHC2021

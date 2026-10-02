@@ -1,36 +1,62 @@
-{-# LANGUAGE OverloadedStrings, BlockArguments, DeriveAnyClass #-}
+{-# LANGUAGE OverloadedStrings, BlockArguments #-}
 module Main (main) where
 
-import GHC.Generics
 import Control.Concurrent
-import Options.Generic
+import Data.Maybe (fromMaybe)
+import qualified Data.Text as T
+import Options.Applicative
 import System.Exit
 import System.Process
 import Control.Events
-import Network.MQTT.Topic (Topic)
+import Network.MQTT.Topic (Topic, unTopic)
 
-data Command
-  = Script      Text FilePath [String]
-  | Healthcheck Text FilePath [String]
-  -- | Trigger     Text
-      -- ^ Trigger a message to a topic
-  deriving (Generic, Show, ParseRecord)
+-- | What to run, and the rules its events carry.
+data Opts = Opts
+  { expected :: Maybe Integer
+  , timeout  :: Maybe Int
+  , critical :: Bool
+  , label    :: Maybe String
+  , topic    :: Topic
+  , exe      :: FilePath
+  , args     :: [String]
+  }
+
+opts :: Parser Opts
+opts = Opts
+  <$> optional (option auto (long "expected" <> metavar "SECS" <> help "The next run is expected within this many seconds"))
+  <*> optional (option auto (long "timeout" <> metavar "SECS" <> help "The run must finish within this many seconds"))
+  <*> switch (long "critical" <> help "Any problem with a run is a critical failure")
+  <*> optional (strOption (long "label" <> metavar "LABEL" <> help "What the run is (default: the topic)"))
+  <*> argument (maybeReader (mkTopic . T.pack)) (metavar "TOPIC")
+  <*> strArgument (metavar "EXE")
+  <*> many (strArgument (metavar "ARGS..."))
+
+data Command = Script Opts | Healthcheck Opts
+
+cmds :: Parser Command
+cmds = hsubparser
+  (  cmd "script" Script "Send an event for the program's run"
+  <> cmd "healthcheck" Healthcheck "Send a healthcheck event every --expected seconds (default 60) while the program runs" )
+  where
+    cmd n f d = command n (info (f <$> opts) (progDesc d))
 
 main :: IO ()
-main = getRecord "control-events" >>= \case
-  Script topic exe args
-    | Just tp <- mkTopic topic -> runScript tp exe args
-    | otherwise                -> die "<topic> isn't a valid MQTT topic"
-  Healthcheck topic exe args
-    | Just tp <- mkTopic topic -> runHealthcheck tp exe args
-    | otherwise                -> die "<topic> isn't a valid MQTT topic"
+main = execParser (info (cmds <**> helper) (progDesc "Run a program, sending control-events about it")) >>= \case
+  Script o      -> runScript o
+  Healthcheck o -> runHealthcheck o
 
-runScript :: Topic -> FilePath -> [String] -> IO ()
-runScript topic exe args = do
+msgOf :: Opts -> EvtMsg ()
+msgOf o = simple (fromMaybe (T.unpack (unTopic o.topic)) o.label)
+  & evtExpected .~ (fromInteger <$> o.expected)
+  & evtTimeout %~ (\t -> fromMaybe t o.timeout)
+  & evtCritical .~ o.critical
+
+runScript :: Opts -> IO ()
+runScript o = do
   exitCode <- withConn script \c -> do
 
-    event c (simple (unwords (exe:args))) topic \_ -> do
-      (_,_,_,ph) <- createProcess (proc exe args)
+    event c (msgOf o) o.topic \_ -> do
+      (_,_,_,ph) <- createProcess (proc o.exe o.args)
         -- we can't read the output of the program without changing its
         -- behavior wrt the stdout / tty things. The stdout/err/in must remain
         -- as 'Inherit' to ensure it is just as if the program had been invoked
@@ -43,10 +69,8 @@ runScript topic exe args = do
 
   exitWith exitCode
 
-runHealthcheck :: Topic -> FilePath -> [String] -> IO ()
-runHealthcheck topic exe args = do
-  let msg = simple (unwords (exe:args))
-  _          <- forkIO $ healthcheckThread 60 msg topic
-  (_,_,_,ph) <- createProcess (proc exe args)
+runHealthcheck :: Opts -> IO ()
+runHealthcheck o = do
+  _          <- forkIO $ healthcheckThread (fromMaybe 300 o.expected) (msgOf o) o.topic
+  (_,_,_,ph) <- createProcess (proc o.exe o.args)
   waitForProcess ph >>= exitWith
-
