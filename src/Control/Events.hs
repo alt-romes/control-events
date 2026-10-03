@@ -528,7 +528,7 @@ react (Conn mc _conn_base handlersRef _) f h = bracket sub unsub (\() -> waitFor
     sub_opts = SubOptions
       { _retainHandling = SendOnSubscribe -- on subscribe, receive all retained messages always
       , _retainAsPublished = False -- default
-      , _noLocal = True -- don't receive your own messages
+      , _noLocal = False -- /do/ receive your own messages, e.g. the dashboard wants to see the events it sends.
       , _subQoS = QoS2  -- msgs published as QoS2 can be sent from the broker to us with QoS2 too
       }
 
