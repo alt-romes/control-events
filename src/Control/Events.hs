@@ -41,6 +41,7 @@ import Data.Time.Clock
 import GHC.Generics
 import Control.Concurrent.Async
 import Control.Concurrent
+import GHC.Conc (STM)
 import Control.Exception
 import Control.Monad
 import Data.Aeson as JSON
@@ -222,8 +223,8 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
 
       modifyPending f = atomicModifyIORef' pending (\pm -> (f pm, ()))
 
-isConnUp :: Conn -> IO Bool
-isConnUp Conn{connClient} = isConnected connClient
+isConnUp :: Conn -> STM Bool
+isConnUp Conn{connClient} = isConnectedSTM connClient
 
 -- * Messages ------------------------------------------------------------------
 
