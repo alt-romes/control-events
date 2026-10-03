@@ -209,6 +209,13 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
             Nothing -> do
                 -- Remove this pending entry from the map after the timeout.
                 -- If there was already a match, Map.delete uuid will be a no-op.
+                --
+                -- TODO: We should provide a way of handling /finished events
+                -- that arrive after the timeout or on their own. Using react,
+                -- we will lose all events that are finished beyond their
+                -- timeout or across restarts, whereas when the dashboard was
+                -- doing this manually it registered a /finished that arrived
+                -- much later.
                 _ <- forkIO $ do
                   threadDelay (timeout*1_000_000)
                   modifyPending (Map.delete (uuid, filt))
