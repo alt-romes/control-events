@@ -86,7 +86,7 @@ data Conn = Conn
     -- messages would collapse into just one on the pending map.
   }
 
-data MsgHandler = forall m. FromJSON m => SomeMsgHandler (EventId -> EvtMsg m -> EvtDone -> IO ())
+data MsgHandler = forall m. FromJSON m => SomeMsgHandler (EventId -> EvtMsg m -> IO (EvtDone -> IO ()))
 
 -- | A pending transaction is waiting for the other half of the transaction.
 -- Typically, /start comes first, but a /finished may arrive first because of
@@ -179,8 +179,10 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
          , let termin = last (split topic)
          -> if | "start" <- termin
                , Just (Timed _ emsg) <- decode @(Timed (EvtMsg m)) msg
-               -> pair (uuid, filt) (emsg.rules.timeout + 30) -- expected /finished according to rules.timeout
-                       (PendingStart (handler (EventId uuid (txnTopic topic)) emsg))
+               -> do
+                  h_p2 <- handler (EventId uuid (txnTopic topic)) emsg
+                  pair (uuid, filt) (emsg.rules.timeout + 30) -- expected /finished according to rules.timeout
+                       (PendingStart h_p2)
 
                | "finished" <- termin
                , Just (Timed _ edn) <- decode @(Timed EvtDone) msg
@@ -464,9 +466,12 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 
 -- | Block waiting for "completed" events under this topic, forever, until the
 -- broker disconnects. The handler will be run for matching topics whenever a
--- pair @.../start@ + @.../finished@ is received. Reacting to a started (but
--- unfinished) event is not supported. You can only react to completed
--- transactional events.
+-- pair @.../start@ + @.../finished@ is received. The handler
+--    @(EventId -> EvtMsg m -> IO (EvtDone -> IO ()))@
+--
+-- is run in two phases, where the first IO action is run on /start, but it
+-- should typically only "do the main action" on the inner action on @EvtDone@,
+-- which is run when the matching /finished arrives.
 --
 -- For every message that arrives matching this 'Filter', try to decode it as
 -- an @EvtMsg m@ and pass it to the given handler. If decoding fails, the msg
@@ -497,7 +502,7 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 -- react to topics outside of the base topic we're publishing at. For instance,
 -- we may want to react to @trigger/finances/gen-invoice@ from a process
 -- publishing under a @script/finances@ topic)
-react :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> EvtDone -> IO ()) -> IO ()
+react :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> IO (EvtDone -> IO ())) -> IO ()
 react (Conn mc _conn_base handlersRef _) f h = bracket sub unsub (\() -> waitForClient mc)
   where
     sub = do
@@ -532,7 +537,9 @@ react (Conn mc _conn_base handlersRef _) f h = bracket sub unsub (\() -> waitFor
 reactOnce :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> EvtDone -> IO ()) -> IO ()
 reactOnce mc f h = do
   w <- newEmptyMVar
-  race (react mc f (\i m d -> void (tryPutMVar w (i, m, d)))) -- tryPutMVar: the first msg handler succeeds, the others ignore it
+  race (react mc f (\i m -> pure $ \d -> void (tryPutMVar w (i, m, d))))
+                      -- tryPutMVar: the first handler run succeeds writing the
+                      -- msg, the following handler runs ignore the msg
        (takeMVar w) >>= \case
     Left ()      -- react finished before the handler ran:
       -> fail "reactOnce: disconnected or canceled before receiving a message"
