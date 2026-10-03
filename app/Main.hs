@@ -8,6 +8,7 @@ import Options.Applicative
 import System.Exit
 import System.Process
 import Control.Events
+import Control.Events.Health
 import Network.MQTT.Topic (Topic, unTopic)
 
 -- | What to run, and the rules its events carry.

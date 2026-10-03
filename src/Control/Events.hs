@@ -5,7 +5,7 @@ module Control.Events
   (
   -- * Establishing a connection
     withConn, withPersistentConn, Conn
-  , healthcheckThread
+  , isConnUp
 
   -- * Running tasks delimited by events
   , event, event_
@@ -222,24 +222,8 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
 
       modifyPending f = atomicModifyIORef' pending (\pm -> (f pm, ()))
 
--- | The content for a thread to periodically send a healthcheck event.
--- Usage: @forkIO (healthcheckThread ...)@
-healthcheckThread :: ToJSON m => Integer {-^ Ping frequency in seconds -} -> Topic -> EvtMsg m -> IO ()
-healthcheckThread delay_secs topic msg0 = forever do
-  _ <- try @SomeException $ withConn healthcheck \c -> do
-    forever do
-      let msg = msg0 & evtExpected ?~ fromInteger delay_secs
-                     & evtTimeout  .~ 30
-
-      event c topic msg \_ -> pure (done "" ())
-
-      threadDelay (fromInteger delay_secs*1_000_000) -- microseconds
-
-  -- If the `withConn` conn fails (e.g. computer sleeps and the connection
-  -- times out), then we don't want this thread to die. Just wait a little and
-  -- try again.
-  threadDelay (fromInteger delay_secs*1_000_000)
-
+isConnUp :: Conn -> IO Bool
+isConnUp Conn{connClient} = isConnected connClient
 
 -- * Messages ------------------------------------------------------------------
 

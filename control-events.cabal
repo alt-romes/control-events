@@ -17,7 +17,7 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Control.Events
+    exposed-modules:  Control.Events, Control.Events.Health
     build-depends:    base, bytestring, text, containers, async,
                       network-uri, uuid, aeson, time, microlens, net-mqtt
     hs-source-dirs:   src
