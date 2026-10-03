@@ -182,7 +182,11 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
                , Just emsg <- decode @(Timed (EvtMsg m)) msg
                -> do
                   h_p2 <- handler (EventId uuid (txnTopic topic)) emsg
-                  pair (uuid, filt) (emsg.e.rules.timeout + 30) -- expected /finished according to rules.timeout
+                  pair (uuid, filt) (emsg.e.rules.timeout*2)
+                          -- expected /finished according to rules.timeout
+                          -- x2 to have bigger window to match a delayed pair
+                          -- (the dashboard may want to display a timed-out but
+                          -- received later /finished)
                        (PendingStart h_p2)
 
                | "finished" <- termin
