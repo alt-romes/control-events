@@ -194,25 +194,23 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
          -> pure ()
     where
       pair (uuid, filt) timeout ptxn = do
-        pnd <- readIORef pending
-        case Map.lookup (uuid, filt) pnd of
-          Nothing -- ptxn is the first half
-            -> do
-              -- Remove this entry from the map after the timeout.
-              -- This will clear the map both in the case the txn never
-              -- completes and in the case it does (as long as the match
-              -- arrives and looks up its other half before the timeout).
-              _ <- forkIO $ do
-                threadDelay (timeout*1_000_000)
-                modifyPending (Map.delete (uuid, filt))
-              modifyPending (Map.insert (uuid, filt) ptxn)
-          Just (PendingStart act)
-            | PendingFinished dn <- ptxn
-            -> act dn
-          Just (PendingFinished dn)
-            | PendingStart act <- ptxn
-            -> act dn
-          _ -> pure () -- duplicate finish; impossible with QoS2, but ignore.
+        atomicModifyIORef' pending (\pm -> case (Map.lookup (uuid, filt) pm, ptxn) of
+          (Nothing, _)
+            -> (Map.insert (uuid, filt) ptxn pm, Nothing)
+          (Just (PendingStart act),   PendingFinished dn)
+            -> (Map.delete (uuid, filt) pm, Just (act dn))
+          (Just (PendingFinished dn), PendingStart act)
+            -> (Map.delete (uuid, filt) pm, Just (act dn))
+          _ -> (pm, Just (pure ())) -- duplicate start or finish (impossible with QoS2)
+          ) >>= \case
+            Nothing -> do
+                -- Remove this pending entry from the map after the timeout.
+                -- If there was already a match, Map.delete uuid will be a no-op.
+                _ <- forkIO $ do
+                  threadDelay (timeout*1_000_000)
+                  modifyPending (Map.delete (uuid, filt))
+                pure ()
+            Just runIt -> runIt
 
       corrData (PropCorrelationData i) = Just i
       corrData _                       = Nothing
