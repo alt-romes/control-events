@@ -86,7 +86,7 @@ data Conn = Conn
     -- messages would collapse into just one on the pending map.
   }
 
-data MsgHandler = forall m. FromJSON m => SomeMsgHandler (EventId -> EvtMsg m -> IO (EvtDone -> IO ()))
+data MsgHandler = forall m. FromJSON m => SomeMsgHandler (EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO ()))
 
 -- | A pending transaction is waiting for the other half of the transaction.
 -- Typically, /start comes first, but a /finished may arrive first because of
@@ -100,14 +100,14 @@ data PendingTxn
   --
   -- This transaction will be cleared from the map if its pair doesn't arrive
   -- within the rules timeout for this event.
-  = PendingStart (EvtDone -> IO ())
+  = PendingStart (Timed EvtDone -> IO ())
   -- | A .../finished event arrived before the /start. Hold on to the 'EvtDone'
   -- and run the handler when the /start arrives.
   --
   -- This transaction is cleared if the pair doesn't arrive within a short
   -- amount of time. We expect it to be available very soon after start if it's
   -- simply caused by an out-of-order issue.
-  | PendingFinished EvtDone
+  | PendingFinished (Timed EvtDone)
 
 -- | Open a connection to the broker for this service to send events.
 -- The 'Topic' argument is used as the base topic for events sent within this
@@ -178,14 +178,14 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
          , Just uuid <- UUID.fromLazyASCIIBytes i
          , let termin = last (split topic)
          -> if | "start" <- termin
-               , Just (Timed _ emsg) <- decode @(Timed (EvtMsg m)) msg
+               , Just emsg <- decode @(Timed (EvtMsg m)) msg
                -> do
                   h_p2 <- handler (EventId uuid (txnTopic topic)) emsg
-                  pair (uuid, filt) (emsg.rules.timeout + 30) -- expected /finished according to rules.timeout
+                  pair (uuid, filt) (emsg.e.rules.timeout + 30) -- expected /finished according to rules.timeout
                        (PendingStart h_p2)
 
                | "finished" <- termin
-               , Just (Timed _ edn) <- decode @(Timed EvtDone) msg
+               , Just edn <- decode @(Timed EvtDone) msg
                -> pair (uuid, filt) 30 -- expect /start very soon after /finished
                        (PendingFinished edn)
 
@@ -248,7 +248,7 @@ data EventId = EventId { correlationId :: UUID.UUID, evtTopic :: Topic }
   deriving stock Generic
   deriving anyclass (ToJSON, FromJSON)
 
-data Timed a = Timed { at :: UTCTime, x :: a }
+data Timed a = Timed { at :: UTCTime, e :: a }
   deriving stock Generic
   deriving anyclass (ToJSON, FromJSON)
 
@@ -502,7 +502,7 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 -- react to topics outside of the base topic we're publishing at. For instance,
 -- we may want to react to @trigger/finances/gen-invoice@ from a process
 -- publishing under a @script/finances@ topic)
-react :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> IO (EvtDone -> IO ())) -> IO ()
+react :: FromJSON m => Conn -> Filter -> (EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO ())) -> IO ()
 react (Conn mc _conn_base handlersRef _) f h = bracket sub unsub (\() -> waitForClient mc)
   where
     sub = do
@@ -534,7 +534,7 @@ react (Conn mc _conn_base handlersRef _) f h = bracket sub unsub (\() -> waitFor
 
 -- | Block waiting to 'react' exactly once to one message matching this filter
 -- and then unsubscribe, unregister the handler, and resume.
-reactOnce :: FromJSON m => Conn -> Filter -> (EventId -> EvtMsg m -> EvtDone -> IO ()) -> IO ()
+reactOnce :: FromJSON m => Conn -> Filter -> (EventId -> Timed (EvtMsg m) -> Timed EvtDone -> IO ()) -> IO ()
 reactOnce mc f h = do
   w <- newEmptyMVar
   race (react mc f (\i m -> pure $ \d -> void (tryPutMVar w (i, m, d))))
