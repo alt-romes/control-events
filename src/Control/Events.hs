@@ -4,7 +4,7 @@
 module Control.Events
   (
   -- * Establishing a connection
-    withConn, Conn
+    withConn, withPersistentConn, Conn
   , healthcheckThread
 
   -- * Running tasks delimited by events
