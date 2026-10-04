@@ -154,13 +154,16 @@ in
           (simpl_listen cfg.listenOn); # should be a private ip
 
         # Bridges specify how to connect multiple MQTT brokers together
-        # In our case, we always proxy topics out, and optionally in
+        # In our case, we always proxy topics out, and optionally in.
         bridges = lib.mkIf (cfg.proxyTo != null) {
           "proxy_to" = {
             addresses = [{ address = cfg.proxyTo; }];
             topics = [ "# out 2" ] ++ lib.optional cfg.bridge2 "# in 2";
             settings = {
               cleansession = false;
+              # 0 (default) would make the session expire immediately when the
+              # connection drops, rather than queueing messages
+              bridge_session_expiry_interval = 86400*5; # 7 days
               remote_clientid = cfg.nodeId;
               bridge_protocol_version = "mqttv50";
             };
