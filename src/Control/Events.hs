@@ -1,10 +1,12 @@
-{-# LANGUAGE TypeAbstractions, MultiWayIf, BlockArguments, CPP,
-             OverloadedStrings, OverloadedRecordDot, DeriveAnyClass #-}
+{-# LANGUAGE RequiredTypeArguments, TypeData, TypeAbstractions, MultiWayIf, BlockArguments, CPP,
+             OverloadedStrings, OverloadedRecordDot, DeriveAnyClass,
+             RecordWildCards #-}
 {-# OPTIONS_GHC -Wno-orphans #-} -- JSON Topic
 module Control.Events
   (
   -- * Establishing a connection
     withConn, withPersistentConn, Conn
+  , SessionData(..), SessionType(..)
   , isConnUp
 
   -- * Running tasks delimited by events
@@ -33,6 +35,7 @@ module Control.Events
 
 import qualified Data.List.NonEmpty as NE
 import qualified Data.List as L
+import GHC.TypeLits
 import Data.Semigroup
 import Data.Either
 import Data.IORef
@@ -53,8 +56,11 @@ import Network.MQTT.Types (RetainHandling(..))
 import qualified Data.Map as Map
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
+import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.ByteString.Lazy as LBS
+import Data.Proxy
+import GHC.TypeError
 
 
 -- * Topics --------------------------------------------------------------------
@@ -68,7 +74,11 @@ trigger = fromJust (mkTopic "trigger")
 -- * Connection ----------------------------------------------------------------
 
 -- | A connection to send events to the broker for a particular service
-data Conn = Conn
+--
+-- The @session@ type argument statically tracks for persistent sessions the
+-- superset of topics the client will subscribe to. See the haddocks on
+-- @SessionType@ for more details.
+data Conn (session :: SessionType) = Conn
   { connClient    :: MQTTClient
   , connBaseTopic :: Topic
   , connHandlers  :: IORef (Map.Map Filter MsgHandler)
@@ -86,6 +96,17 @@ data Conn = Conn
     -- map key must also include the handler filter, since otherwise the two
     -- messages would collapse into just one on the pending map.
   }
+
+-- | A persistent session must declare upfront all topics it may ever subscribe.
+--
+-- If the client was disconnected, the broker will keep the messages this
+-- client was subscribed to, and replay them all *on reconnect* (rather than
+-- when re-subscribing).
+--
+-- Therefore, to support the dynamically registered 'react's, we track at the
+-- type level the superset of subscribed topics by a persistent session and
+-- queue on our end all
+type data SessionType = CleanSession | PersistentSession [Symbol]
 
 data MsgHandler = forall m. FromJSON m => SomeMsgHandler (EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO ()))
 
@@ -114,24 +135,33 @@ data PendingTxn
 -- The 'Topic' argument is used as the base topic for events sent within this
 -- connection, so it should represent the service or type rather than any
 -- particular task.
-withConn :: Topic -- ^ Service topic, e.g. @'server' <> "kanjideck-fulfillment"@
+withConn :: forall r
+          . Topic -- ^ Service topic, e.g. @'server' <> "kanjideck-fulfillment"@
                   --                    or @'script' <> "finances" <> "mercurybank-hs"@
                   --                    or perhaps even just @'script'@.
-         -> (Conn -> IO r)
+         -> (Conn CleanSession -> IO r)
          -> IO r
-withConn = withPersistentConn Nothing
+withConn = withPersistentConn SCleanSession
+
+data SessionData (s :: SessionType) where
+  SCleanSession      :: SessionData CleanSession
+  SPersistentSession :: KnownFilters topics => String -> SessionData (PersistentSession topics)
+  -- ^ The string is a persistent connection ID. If the connection goes down, messages meant
+  -- for this listener will be queued and delivered when we reconnect using the
+  -- same ID.
 
 -- | Like 'withConn', but the session is persistent, so messages meant for it
 -- are queued even if we are offline, and delivered on reconnect.
 withPersistentConn
-  :: Maybe String
-  -- ^ A persistent connection ID. If the connection goes down, messages meant
-  -- for this listener will be queued and delivered when we reconnect using the
-  -- same ID. Nothing means the connection is not persistent.
+  :: SessionData s
   -> Topic
-  -> (Conn -> IO r)
+  -> (Conn s -> IO r)
   -> IO r
-withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker where
+withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker where
+
+  mbyID = case sd of SCleanSession          -> Nothing
+                     SPersistentSession sid -> Just sid
+
   connectBroker = do
     handlersRef <- newIORef Map.empty
     pendingRef  <- newIORef Map.empty
@@ -171,6 +201,9 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
   disconnectBroker Conn{connClient} = normalDisconnect connClient
 
   globalMsgCallback handlers pending = SimpleCallback $ \_c topic msg props -> do
+    -- TODO: the default handlers should queue messages we get on connect and
+    -- relay them to the subscribers as they come when using a persistent
+    -- session.
     hs <- readIORef handlers
     -- Try all the handlers
     forM_ (Map.toList hs) $ \(filt, SomeMsgHandler @m handler) ->
@@ -234,7 +267,12 @@ withPersistentConn mbyID serviceTopic = bracket connectBroker disconnectBroker w
 
       modifyPending f = atomicModifyIORef' pending (\pm -> (f pm, ()))
 
-isConnUp :: Conn -> STM Bool
+      topicsTerm :: [Filter]
+      topicsTerm = case sd of
+        SPersistentSession @topics _ -> reifyFilters (Proxy @topics)
+        SCleanSession                -> []
+
+isConnUp :: Conn s -> STM Bool
 isConnUp Conn{connClient} = isConnectedSTM connClient
 
 -- * Messages ------------------------------------------------------------------
@@ -411,7 +449,7 @@ evtCritical = lens (\s -> s.rules.critical) (\s b -> s{rules = s.rules{critical 
 -- * Publishing ----------------------------------------------------------------
 
 -- | Send a delimited "transactional" event
-event :: (ToJSON m) => Conn -> Topic -> EvtMsg m -> (EventId -> IO (EvtDone, r)) -> IO r
+event :: (ToJSON m) => Conn s -> Topic -> EvtMsg m -> (EventId -> IO (EvtDone, r)) -> IO r
 event (Conn mc conn_base _ _) topic edt k = do
   mask $ \restore -> do
     eid <- startEvent
@@ -454,7 +492,7 @@ event (Conn mc conn_base _ _) topic edt k = do
     }
 
 -- | 'event', but the result is @'done' "OK"@ unless an exception is thrown.
-event_ :: ToJSON m => Conn -> Topic -> EvtMsg m -> (EventId -> IO r) -> IO r
+event_ :: ToJSON m => Conn s -> Topic -> EvtMsg m -> (EventId -> IO r) -> IO r
 event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 
 
@@ -498,8 +536,12 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 -- react to topics outside of the base topic we're publishing at. For instance,
 -- we may want to react to @trigger/finances/gen-invoice@ from a process
 -- publishing under a @script/finances@ topic)
-react :: FromJSON m => Conn -> Filter -> (EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO ())) -> IO ()
-react (Conn mc _conn_base handlersRef _) f h = bracket sub unsub (\() -> waitForClient mc)
+react :: forall m s. Conn s
+      -> forall topic
+      -> StaticTopic s topic => KnownFilters '[topic] => FromJSON m
+      => (EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO ()))
+      -> IO ()
+react (Conn mc _conn_base handlersRef _) topic h = bracket sub unsub (\() -> waitForClient mc)
   where
     sub = do
       atomicModifyIORef' handlersRef (\m -> (Map.insert f (SomeMsgHandler h) m, ()))
@@ -520,6 +562,7 @@ react (Conn mc _conn_base handlersRef _) f h = bracket sub unsub (\() -> waitFor
       = [f] -- already matches .../start and .../finished
       | otherwise
       = [f <> "start", f <> "finished"]
+    [f] = reifyFilters (Proxy @'[topic])
 
     sub_opts = SubOptions
       { _retainHandling = SendOnSubscribe -- on subscribe, receive all retained messages always
@@ -530,10 +573,15 @@ react (Conn mc _conn_base handlersRef _) f h = bracket sub unsub (\() -> waitFor
 
 -- | Block waiting to 'react' exactly once to one message matching this filter
 -- and then unsubscribe, unregister the handler, and resume.
-reactOnce :: FromJSON m => Conn -> Filter -> (EventId -> Timed (EvtMsg m) -> Timed EvtDone -> IO ()) -> IO ()
-reactOnce mc f h = do
+reactOnce :: forall m s
+           . Conn s
+          -> forall topic
+          -> StaticTopic s topic => KnownFilters '[topic] => FromJSON m
+          => (EventId -> Timed (EvtMsg m) -> Timed EvtDone -> IO ())
+          -> IO ()
+reactOnce mc topic h = do
   w <- newEmptyMVar
-  race (react mc f (\i m -> pure $ \d -> void (tryPutMVar w (i, m, d))))
+  race (react mc topic (\i m -> pure $ \d -> void (tryPutMVar w (i, m, d))))
                       -- tryPutMVar: the first handler run succeeds writing the
                       -- msg, the following handler runs ignore the msg
        (takeMVar w) >>= \case
@@ -541,6 +589,45 @@ reactOnce mc f h = do
       -> fail "reactOnce: disconnected or canceled before receiving a message"
     Right (i, m, d) -- handler ran and stored the first message:
       -> h i m d
+
+-- * Subscribing in persistent connection (see SessionType) --------------------
+
+-- | Make sure the topic is declared in the list of persistent topics if this is a persistent session
+class StaticTopic (s :: SessionType) (topic :: Symbol)
+
+-- | In a clean session we don't track statically the subscribed topics, so
+-- anything can be subscribed. On disconnect, no messages will be queued for us.
+instance StaticTopic CleanSession topic
+
+instance Unsatisfiable ('Text "Topic " ':<>: 'ShowType topic ':<>:
+          'Text " must be declared in the SPersistentSession topics list.")
+         => StaticTopic (PersistentSession '[]) topic
+
+-- | If the topic is declared in the static superset of topics of this
+-- persistent session, all is good. We'll keep all messages queued for us on
+-- re-connect, and replay them when 'react' for a matching topic is called.
+--
+-- We assume that if we have any queued message, it is meant to be delivered to
+-- the matching react as soon as it starts subscribing. Because if at some
+-- point you became dynamically uninterested in a topic, then you canceled your
+-- 'react', which unsubscribed so the broker wouldn't queue any messages.
+instance {-# OVERLAPPING #-}
+         StaticTopic (PersistentSession (topic ': rest)) topic
+
+-- | Inductive case
+instance {-# OVERLAPPABLE #-}
+         StaticTopic (PersistentSession rest) topic
+      => StaticTopic (PersistentSession (other ': rest)) topic
+
+-- ** Reifying a list of filters
+
+-- | Reify a list of filters
+class KnownFilters (topics :: [Symbol]) where
+  reifyFilters :: Proxy topics -> [Filter]
+
+instance KnownFilters '[] where reifyFilters _ = []
+instance (KnownSymbol x, KnownFilters xs) => KnownFilters (x ': xs) where
+  reifyFilters _ = fromJust (mkFilter (T.pack (symbolVal (Proxy @x)))) : reifyFilters (Proxy @xs)
 
 -- * Instances -----------------------------------------------------------------
 
