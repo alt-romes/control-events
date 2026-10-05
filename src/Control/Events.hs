@@ -152,6 +152,13 @@ data SessionData (s :: SessionType) where
 
 -- | Like 'withConn', but the session is persistent, so messages meant for it
 -- are queued even if we are offline, and delivered on reconnect.
+--
+-- TODO: Explain carefully list of properties achieved from persistent session exactly.
+-- Namely: safety when re-connecting within the same process sharing the
+-- pending list (in-process state), safety when re-connecting across different
+-- processes (lose start/finish pairing -- fine, we'll see failed start, but
+-- reconnecting across start/finish should be very rare), and what happens to
+-- queued messages from the broker in both cases.
 withPersistentConn
   :: SessionData s
   -> Topic
