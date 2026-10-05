@@ -47,7 +47,7 @@ import Data.Maybe
 import Data.Time.Clock
 import GHC.Generics
 import Control.Concurrent
-import GHC.Conc (STM)
+import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
 import Data.Aeson as JSON
@@ -64,6 +64,7 @@ import qualified Data.Text.Encoding as T
 import qualified Data.ByteString.Lazy as LBS
 import Data.Proxy
 import GHC.TypeError
+import Control.Applicative
 
 
 -- * Topics --------------------------------------------------------------------
@@ -595,17 +596,24 @@ reactOnce :: forall m s a
           => EvtHandler m a
           -> IO a
 reactOnce mc topic h = do
-  w <- newEmptyMVar
+  w <- newEmptyTMVarIO
   unsub <- react mc topic $ \i m -> pure $ \d ->
              -- tryPutMVar: the first handler run succeeds writing the msg, the
              -- following handler runs ignore the msg
-             void (tryPutMVar w (i, m, d))
+             void (atomically (tryPutTMVar w (i, m, d)))
 
-  (i, m, d) <- takeMVar w -- handler ran and stored the first message
-  unsub
-  f <- h i m
-  x <- f d
-  pure x
+  waited <- atomically $
+    (Right <$> takeTMVar w) -- handler ran and stored the first message
+      <|>                   -- and, don't block forever if conn disconnects in
+    (Left () <$ (check . not =<< isConnUp mc))                 -- the meantime
+
+  case waited of
+    Left () -> fail "reactOnce: disconnected before receiving a message"
+    Right (i, m, d) -> do
+      unsub
+      f <- h i m
+      x <- f d
+      pure x
 
 -- | Block waiting for the broker to disconnect.
 --
