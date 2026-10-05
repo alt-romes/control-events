@@ -27,7 +27,11 @@ module Control.Events
 
   -- ** Topics
   , script, server, healthcheck, trigger
-  , mkTopic
+  , mkTopic, mkFilter
+  , withDynamicFilter
+
+  -- ** For persistent sessions
+  , StaticTopic, KnownFilters
 
   -- * Re-exports
   , module Lens.Micro
@@ -545,7 +549,7 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 -- publishing under a @script/finances@ topic)
 react :: forall m s. Conn s
       -> forall topic
-      -> StaticTopic s topic => KnownFilters '[topic] => FromJSON m
+      -> StaticTopic s topic => KnownSymbol topic => FromJSON m
       => (EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO ()))
       -> IO ()
 react (Conn mc _conn_base handlersRef _) topic h = bracket sub unsub (\() -> waitForClient mc)
@@ -569,7 +573,7 @@ react (Conn mc _conn_base handlersRef _) topic h = bracket sub unsub (\() -> wai
       = [f] -- already matches .../start and .../finished
       | otherwise
       = [f <> "start", f <> "finished"]
-    [f] = reifyFilters (Proxy @'[topic])
+    f = fromJust (mkFilter (T.pack (symbolVal (Proxy @topic))))
 
     sub_opts = SubOptions
       { _retainHandling = SendOnSubscribe -- on subscribe, receive all retained messages always
@@ -583,7 +587,7 @@ react (Conn mc _conn_base handlersRef _) topic h = bracket sub unsub (\() -> wai
 reactOnce :: forall m s
            . Conn s
           -> forall topic
-          -> StaticTopic s topic => KnownFilters '[topic] => FromJSON m
+          -> StaticTopic s topic => KnownSymbol topic => FromJSON m
           => (EventId -> Timed (EvtMsg m) -> Timed EvtDone -> IO ())
           -> IO ()
 reactOnce mc topic h = do
@@ -598,6 +602,15 @@ reactOnce mc topic h = do
       -> h i m d
 
 -- * Subscribing in persistent connection (see SessionType) --------------------
+
+-- ** Dynamic topics in clean sessions
+
+-- | In a clean session, the topic can be constructed dynamically (doesn't have
+-- to be known statically). This is a helper to reify a Filter to the type system.
+withDynamicFilter :: Filter -> (forall topic. KnownSymbol topic => r) -> r
+withDynamicFilter f k = withSomeSSymbol (T.unpack (unFilter f)) (\(ss :: SSymbol s) -> withKnownSymbol ss (k @s))
+
+-- ** Checking the topic is statically declared
 
 -- | Make sure the topic is declared in the list of persistent topics if this is a persistent session
 class StaticTopic (s :: SessionType) (topic :: Symbol)
