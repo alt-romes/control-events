@@ -218,14 +218,15 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
     hs <- readIORef handlers
     -- Try all the handlers
     forM_ (Map.toList hs) $ \(filt, SomeMsgHandler @m handler) ->
-      if | match filt (txnTopic topic)
+      if | Just ttopic <- txnTopic topic
+         , match filt ttopic
          , [i]       <- mapMaybe corrData props
          , Just uuid <- UUID.fromLazyASCIIBytes i
          , let termin = last (split topic)
          -> if | "start" <- termin
                , Just emsg <- decode @(Timed (EvtMsg m)) msg
                -> do
-                  h_p2 <- handler (EventId uuid (txnTopic topic)) emsg
+                  h_p2 <- handler (EventId uuid ttopic) emsg
                   pair (uuid, filt) (emsg.e.rules.timeout*2)
                           -- expected /finished according to rules.timeout
                           -- x2 to have bigger window to match a delayed pair
@@ -274,7 +275,7 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
       corrData _                       = Nothing
 
       -- drop "/{start,finished}" from the topic
-      txnTopic = sconcat . NE.fromList . init . split
+      txnTopic = fmap sconcat . NE.nonEmpty . init . split
 
       modifyPending f = atomicModifyIORef' pending (\pm -> (f pm, ()))
 
@@ -652,6 +653,6 @@ instance (KnownSymbol x, KnownFilters xs) => KnownFilters (x ': xs) where
 -- * Instances -----------------------------------------------------------------
 
 instance ToJSON   Topic  where toJSON    = toJSON . unTopic
-instance FromJSON Topic  where parseJSON = withText "Topic" $ pure . fromJust . mkTopic
+instance FromJSON Topic  where parseJSON = withText "Topic"  $ maybe (fail "invalid topic")  pure . mkTopic
 instance ToJSON   Filter where toJSON    = toJSON . unFilter
-instance FromJSON Filter where parseJSON = withText "Topic" $ pure . fromJust . mkFilter
+instance FromJSON Filter where parseJSON = withText "Filter" $ maybe (fail "invalid filter") pure . mkFilter
