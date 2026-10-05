@@ -172,6 +172,10 @@ in
 
         # Persist messages
         persistence = true;
+        settings = {
+          autosave_interval = 300; # save often in case of a crash
+          max_queued_messages = 5000; # keep more than the 1000 default
+        };
       };
 
       networking.firewall = lib.mkIf (cfg.listenOn != null) {
