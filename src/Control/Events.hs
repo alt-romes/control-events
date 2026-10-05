@@ -7,7 +7,7 @@ module Control.Events
   -- * Establishing a connection
     withConn, withPersistentConn, Conn
   , SessionData(..), SessionType(..)
-  , isConnUp
+  , isConnUp, waitConnDisconnect
 
   -- * Running tasks delimited by events
   , event, event_
@@ -46,7 +46,6 @@ import Data.IORef
 import Data.Maybe
 import Data.Time.Clock
 import GHC.Generics
-import Control.Concurrent.Async
 import Control.Concurrent
 import GHC.Conc (STM)
 import Control.Exception
@@ -85,7 +84,7 @@ trigger = fromJust (mkTopic "trigger")
 data Conn (session :: SessionType) = Conn
   { connClient    :: MQTTClient
   , connBaseTopic :: Topic
-  , connHandlers  :: IORef (Map.Map Filter MsgHandler)
+  , connHandlers  :: IORef (Map.Map Filter SomeEvtHandler)
   , connPendingTx :: IORef (Map.Map (UUID.UUID, Filter) PendingTxn)
     -- ^ We can only react to completed transactions.
     -- When we receive a /start we insert the event in the map with correlation
@@ -112,7 +111,7 @@ data Conn (session :: SessionType) = Conn
 -- queue on our end all
 type data SessionType = CleanSession | PersistentSession [Symbol]
 
-data MsgHandler = forall m. FromJSON m => SomeMsgHandler (EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO ()))
+data SomeEvtHandler = forall m. FromJSON m => SomeEvtHandler (EvtHandler m ())
 
 -- | A pending transaction is waiting for the other half of the transaction.
 -- Typically, /start comes first, but a /finished may arrive first because of
@@ -217,7 +216,7 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
     -- session.
     hs <- readIORef handlers
     -- Try all the handlers
-    forM_ (Map.toList hs) $ \(filt, SomeMsgHandler @m handler) ->
+    forM_ (Map.toList hs) $ \(filt, SomeEvtHandler @m handler) ->
       if | Just ttopic <- txnTopic topic
          , match filt ttopic
          , [i]       <- mapMaybe corrData props
@@ -510,27 +509,32 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 
 -- * Subscribing ---------------------------------------------------------------
 
--- | Block waiting for "completed" events under this topic, forever, until the
--- broker disconnects. The handler will be run for matching topics whenever a
--- pair @.../start@ + @.../finished@ is received. The handler
+type EvtHandler m a = EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO a)
+
+-- | Subscribe and register a handler for delimited events under this topic.
+-- The handler will be run for matching topics whenever a pair @.../start@ +
+-- @.../finished@ is received. The handler:
+--
 --    @(EventId -> EvtMsg m -> IO (EvtDone -> IO ()))@
 --
--- is run in two phases, where the first IO action is run on /start, but it
--- should typically only "do the main action" on the inner action on @EvtDone@,
--- which is run when the matching /finished arrives.
+-- is run in two phases, where the first IO action is run on /start, and the
+-- second IO action which is run when the matching /finished arrives.
+-- The handler "main action" should be most often only be done when the event
+-- is "completed", on the second @EvtDone@ IO action.
 --
--- For every message that arrives matching this 'Filter', try to decode it as
+-- For every message that arrives matching this topic, we try to decode it as
 -- an @EvtMsg m@ and pass it to the given handler. If decoding fails, the msg
 -- is ignored.
 --
--- To react to multiple topics you can run 'react' under 'withAsync': you spawn
--- multiple 'react's asynchronously and wait for all (or some) of them at the
--- end.
+-- The return value is an action to unsubscribe and unregister this handler. It
+-- needn't ever be run.
 --
 -- Example of subscribing to two topics:
 -- @
--- concurrently (react c t1 (\(x::EvtMsg MyData) -> ...))
---              (react c t2 ((\y::EvtMsg OtherData) -> ...))
+-- unsub_t1 <- react c t1 (\(x::EvtMsg MyData) -> ...)
+-- unsub_t2 <- react c t2 ((\y::EvtMsg OtherData) -> ...)
+-- ...
+-- waitConnDisconnect c
 -- @
 --
 -- It is safe to call 'react' many times, and from various threads. All
@@ -538,11 +542,8 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 -- handler.
 --
 -- Registering two handlers for the same topic is not supported and is
--- considered UB.
---
--- If 'react' is canceled or the broker disconnects, the handler will be
--- unregistered and we'll unsubscribe further messages on this topic to the
--- broker (if it is still connected).
+-- considered UB. Registering two handlers with overlapping topics is also UB
+-- at the moment. Any given event should match at most one handler topic.
 --
 -- (The 'withConn' "base topic" is unused in 'react', since we may want to
 -- react to topics outside of the base topic we're publishing at. For instance,
@@ -551,18 +552,20 @@ event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 react :: forall m s. Conn s
       -> forall topic
       -> StaticTopic s topic => KnownSymbol topic => FromJSON m
-      => (EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO ()))
-      -> IO ()
-react (Conn mc _conn_base handlersRef _) topic h = bracket sub unsub (\() -> waitForClient mc)
+      => EvtHandler m ()
+      -> IO (IO ())
+      -- ^ Returns the action to unsubscribe and unregister this handler for
+      -- this topic
+react (Conn mc _conn_base handlersRef _) topic h = sub >> return unsub
   where
     sub = do
-      atomicModifyIORef' handlersRef (\m -> (Map.insert f (SomeMsgHandler h) m, ()))
+      atomicModifyIORef' handlersRef (\m -> (Map.insert f (SomeEvtHandler h) m, ()))
       (merrs, _) <- subscribe mc (map (,sub_opts) tfs) []
       case lefts merrs of
         []   -> pure ()
         errs -> fail (show errs)
 
-    unsub () = do
+    unsub = do
       atomicModifyIORef' handlersRef (\m -> (Map.delete f m, ()))
       hasConn <- isConnected mc
       when hasConn $ do
@@ -585,22 +588,31 @@ react (Conn mc _conn_base handlersRef _) topic h = bracket sub unsub (\() -> wai
 
 -- | Block waiting to 'react' exactly once to one message matching this filter
 -- and then unsubscribe, unregister the handler, and resume.
-reactOnce :: forall m s
+reactOnce :: forall m s a
            . Conn s
           -> forall topic
           -> StaticTopic s topic => KnownSymbol topic => FromJSON m
-          => (EventId -> Timed (EvtMsg m) -> Timed EvtDone -> IO ())
-          -> IO ()
+          => EvtHandler m a
+          -> IO a
 reactOnce mc topic h = do
   w <- newEmptyMVar
-  race (react mc topic (\i m -> pure $ \d -> void (tryPutMVar w (i, m, d))))
-                      -- tryPutMVar: the first handler run succeeds writing the
-                      -- msg, the following handler runs ignore the msg
-       (takeMVar w) >>= \case
-    Left ()      -- react finished before the handler ran:
-      -> fail "reactOnce: disconnected or canceled before receiving a message"
-    Right (i, m, d) -- handler ran and stored the first message:
-      -> h i m d
+  unsub <- react mc topic $ \i m -> pure $ \d ->
+             -- tryPutMVar: the first handler run succeeds writing the msg, the
+             -- following handler runs ignore the msg
+             void (tryPutMVar w (i, m, d))
+
+  (i, m, d) <- takeMVar w -- handler ran and stored the first message
+  unsub
+  f <- h i m
+  x <- f d
+  pure x
+
+-- | Block waiting for the broker to disconnect.
+--
+-- Typically used after 'react's if you want to keep reacting forever (until
+-- the broker disconnects for some reason).
+waitConnDisconnect :: Conn s -> IO ()
+waitConnDisconnect Conn{..} = waitForClient connClient
 
 -- * Subscribing in persistent connection (see SessionType) --------------------
 
