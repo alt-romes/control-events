@@ -53,7 +53,7 @@ test-suite control-events-test
     type:             exitcode-stdio-1.0
     main-is:          Main.hs
     hs-source-dirs:   test
-    build-depends:    base, control-events, async, net-mqtt, uuid, stm, tasty, tasty-hunit
+    build-depends:    base, control-events, async, net-mqtt, uuid, stm, tasty, tasty-expected-failure, tasty-hunit
     ghc-options:      -threaded
     default-extensions: OverloadedStrings, OverloadedRecordDot, BlockArguments,
                         RequiredTypeArguments, TypeAbstractions
