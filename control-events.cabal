@@ -47,3 +47,14 @@ executable control-events
     hs-source-dirs:   app
     default-extensions: LambdaCase, OverloadedRecordDot
     default-language: GHC2021
+
+test-suite control-events-test
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    hs-source-dirs:   test
+    build-depends:    base, control-events, async, net-mqtt, uuid, stm, tasty, tasty-hunit
+    ghc-options:      -threaded
+    default-extensions: OverloadedStrings, OverloadedRecordDot, BlockArguments,
+                        RequiredTypeArguments, TypeAbstractions
+    default-language: GHC2024

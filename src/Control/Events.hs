@@ -10,11 +10,16 @@ module Control.Events
   , isConnUp, waitConnDisconnect
 
   -- * Running tasks delimited by events
+
   , event, event_
+
+  , EvtHandler
   , react, reactOnce, react'
+
   , EventId(..), Timed(..)
   , EvtMsg(..), simple
   , scoped, reacted, withMsg
+
   , EvtDone(..), Trigger(..)
   , done, failed
   , withResult, withTriggers
