@@ -80,7 +80,9 @@ server = fromJust (mkTopic "server")
 healthcheck = fromJust (mkTopic "healthcheck")
 trigger = fromJust (mkTopic "trigger")
 
--- * Connection ----------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- * Connection
+--------------------------------------------------------------------------------
 
 -- | A connection to send events to the broker for a particular service
 --
@@ -292,7 +294,9 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
 isConnUp :: Conn s -> STM Bool
 isConnUp Conn{connClient} = isConnectedSTM connClient
 
--- * Messages ------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- * Messages
+--------------------------------------------------------------------------------
 
 -- | An identifier to correlate scoped events and start/stop events
 data EventId = EventId { correlationId :: UUID.UUID, evtTopic :: Topic }
@@ -353,7 +357,9 @@ reacted = lens (\s -> s.reactTo) (\s b -> s{reactTo = b})
 withMsg :: Lens (EvtMsg m) (EvtMsg n) (Maybe m) (Maybe n)
 withMsg = lens (\s -> s.content) (\s b -> s{content = b})
 
--- ** Evt Done -----------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- ** Evt Done
+--------------------------------------------------------------------------------
 
 data EvtDone = EvtDone
   { summary   :: String
@@ -414,7 +420,9 @@ withResult = lens (\(s,_) -> join (res . fromJSON <$> s.result))
 withTriggers :: Lens' (EvtDone, r) [Trigger]
 withTriggers = lens (\(s,_) -> fromMaybe [] s.triggers) (\(s,r) b -> (s{triggers = Just b}, r))
 
--- ** Rules --------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- ** Rules
+--------------------------------------------------------------------------------
 
 -- | Internal consistency/sanity checks/validation rules for this event
 data Rules = Rules
@@ -463,7 +471,9 @@ evtCritical :: Lens' (EvtMsg m) Bool
 evtCritical = lens (\s -> s.rules.critical) (\s b -> s{rules = s.rules{critical = b}})
 
 
--- * Publishing ----------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- * Publishing
+--------------------------------------------------------------------------------
 
 -- | Send a delimited "transactional" event
 event :: (ToJSON m) => Conn s -> Topic -> EvtMsg m -> (EventId -> IO (EvtDone, r)) -> IO r
@@ -513,7 +523,9 @@ event_ :: ToJSON m => Conn s -> Topic -> EvtMsg m -> (EventId -> IO r) -> IO r
 event_ c t m k = event c t m (\e -> done "OK" <$> k e)
 
 
--- * Subscribing ---------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- * Subscribing
+--------------------------------------------------------------------------------
 
 type EvtHandler m a = EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO a)
 
@@ -631,7 +643,9 @@ react' c f h = knownFilter f $ \ @topic -> react c topic h
 waitConnDisconnect :: Conn s -> IO ()
 waitConnDisconnect Conn{..} = waitForClient connClient
 
--- * Subscribing in persistent connection (see SessionType) --------------------
+--------------------------------------------------------------------------------
+-- * Subscribing in persistent connection (see SessionType)
+--------------------------------------------------------------------------------
 
 -- ** Dynamic topics in clean sessions
 
@@ -679,7 +693,9 @@ instance KnownFilters '[] where reifyFilters _ = []
 instance (KnownSymbol x, KnownFilters xs) => KnownFilters (x ': xs) where
   reifyFilters _ = fromJust (mkFilter (T.pack (symbolVal (Proxy @x)))) : reifyFilters (Proxy @xs)
 
--- * Instances -----------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- * Instances
+--------------------------------------------------------------------------------
 
 instance ToJSON   Topic  where toJSON    = toJSON . unTopic
 instance FromJSON Topic  where parseJSON = withText "Topic"  $ maybe (fail "invalid topic")  pure . mkTopic
