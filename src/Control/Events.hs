@@ -70,6 +70,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Proxy
 import GHC.TypeError
 import Control.Applicative
+import System.IO.Error
 
 
 -- * Topics --------------------------------------------------------------------
@@ -216,7 +217,24 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
       }
 
   -- must send DISCONNECT before exiting, otherwise LWT triggers
-  disconnectBroker Conn{connClient} = normalDisconnect connClient
+  disconnectBroker Conn{connClient} =
+    normalDisconnect connClient `catches`
+      [ Handler \case
+          e :: MQTTException
+            -- Tried to disconnect, but connection is already down.
+            | Discod _ <- e
+            -> pure ()
+          e -> throwIO e
+      , Handler \case
+          e :: IOException
+            | isResourceVanishedError e
+            -- The connection got ECONNRESET rather terminating cleanly with EOF,
+            -- likely because of a race between DISCONNECT and acknowledging
+            -- events on a (after DISCONNECT) closed connection.
+            -- See test "closing the connection while events arrive doesn't throw"
+            -> pure ()
+          e -> throwIO e
+      ]
 
   globalMsgCallback handlers pending = SimpleCallback $ \_c topic msg props -> do
     -- TODO: the default handlers should queue messages we get on connect and
