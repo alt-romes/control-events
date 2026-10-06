@@ -11,7 +11,7 @@ module Control.Events
 
   -- * Running tasks delimited by events
   , event, event_
-  , react, reactOnce
+  , react, reactOnce, react'
   , EventId(..), Timed(..)
   , EvtMsg(..), simple
   , scoped, reacted, withMsg
@@ -28,7 +28,7 @@ module Control.Events
   -- ** Topics
   , script, server, healthcheck, trigger
   , mkTopic, mkFilter
-  , withDynamicFilter
+  , knownFilter
 
   -- ** For persistent sessions
   , StaticTopic, KnownFilters
@@ -615,6 +615,10 @@ reactOnce mc topic h = do
       x <- f d
       pure x
 
+-- | 'react' specialized to 'CleanSession', so the 'Filter' is given directly
+react' :: FromJSON m => Conn CleanSession -> Filter -> EvtHandler m () -> IO (IO ())
+react' c f h = knownFilter f $ \ @topic -> react c topic h
+
 -- | Block waiting for the broker to disconnect.
 --
 -- Typically used after 'react's if you want to keep reacting forever (until
@@ -628,8 +632,8 @@ waitConnDisconnect Conn{..} = waitForClient connClient
 
 -- | In a clean session, the topic can be constructed dynamically (doesn't have
 -- to be known statically). This is a helper to reify a Filter to the type system.
-withDynamicFilter :: Filter -> (forall topic. KnownSymbol topic => r) -> r
-withDynamicFilter f k = withSomeSSymbol (T.unpack (unFilter f)) (\(ss :: SSymbol s) -> withKnownSymbol ss (k @s))
+knownFilter :: Filter -> (forall topic. KnownSymbol topic => r) -> r
+knownFilter f k = withSomeSSymbol (T.unpack (unFilter f)) (\(ss :: SSymbol s) -> withKnownSymbol ss (k @s))
 
 -- ** Checking the topic is statically declared
 
