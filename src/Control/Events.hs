@@ -183,7 +183,7 @@ withConn = withPersistentConn SCleanSession
 -- __The main property__: any "delimited events" sent to the broker while we were
 -- disconnected, under topics that we were subscribed to then, are delivered
 -- when we re-register the 'react' handlers for those topics after we reconnect
--- (new 'withPersistentConn'). This is guaranteed without re-using any state at
+-- (new 'withPersistentConn')[1]. This is guaranteed without re-using any state at
 -- all across the two 'withPersistentConn' sessions, i.e. if we have a process
 -- crash during a persistent session, and launch a *brand new* process using
 -- the same persistent identifier, for each 'react' handler we register, the
@@ -219,6 +219,14 @@ withConn = withPersistentConn SCleanSession
 --
 -- In other words, it's sound to not match /start and /finished across fresh
 -- re-connects, even if it's not complete.
+--
+-- [1] To be clear, the handlers for the persistent session messages delivered
+-- on re-connect are /not/ run on re-connect. They are only run after being
+-- registered with 'react' again, and only then are the messages we queued on
+-- our side delivered to those handlers. 'react' registers handlers
+-- dynamically, and it would be at best surprising if on re-connect handlers
+-- started running before being registered again. It also wouldn't be possible
+-- across connections that can't re-use the same persistent 'SessionData'.
 withPersistentConn
   :: SessionData s
   -> Topic
@@ -606,7 +614,7 @@ type EvtHandler m a = EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO a)
 --
 -- is run in two phases, where the first IO action is run on /start, and the
 -- second IO action which is run when the matching /finished arrives.
--- The handler "main action" should be most often only be done when the event
+-- The handler "main action" should most often only be done when the event
 -- is "completed", on the second @EvtDone@ IO action.
 --
 -- For every message that arrives matching this topic, we try to decode it as
