@@ -22,20 +22,20 @@ import Control.Events
 main :: IO ()
 main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-events"
   [ testGroup "react with a dynamic filter in a clean session"
-    [ testCase "reacts to every event sent" $ cleanTest \c base -> do
+    [ testCase "B1 reacts to every event sent" $ cleanTest \c base -> do
         seen <- newLog
         _ <- react' c (base <> "job") (logTo seen)
         forM_ ["one", "two", "three"] \l -> event_ c "job" (simple l) \_ -> pure ()
         seen `logged` [Done "one", Done "two", Done "three"]
 
-    , testCase "wildcard filter matches subtopics" $ cleanTest \c base -> do
+    , testCase "B2 wildcard filter matches subtopics" $ cleanTest \c base -> do
         seen <- newLog
         _  <- react' c (base <> "#") (logTo seen)
         () <- event_ c "a"          (simple "a")   mempty
         () <- event_ c ("b" <> "c") (simple "b/c") mempty
         seen `logged` [Done "a", Done "b/c"]
 
-    , testCase "ignores events outside the filter" $ cleanTest \c base -> do
+    , testCase "B3 ignores events outside the filter" $ cleanTest \c base -> do
         (got, ()) <- concurrently (knownFilter (base <> "job") \ @job -> reactOnce c job outcome) do
           threadDelay 200_000 -- wait sub is active
           () <- event_ c "other" (simple "other") mempty
@@ -43,14 +43,14 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           return ()
         got @?= Done "job"
 
-    , testCase "reports failed and throwing events as unsuccessful" $ cleanTest \c base -> do
+    , testCase "B4 reports failed and throwing events as unsuccessful" $ cleanTest \c base -> do
         seen <- newLog
         _  <- react' c (base <> "job") (logTo seen)
         () <- event c "job" (simple "failed") \_ -> pure (failed "nope" ())
         _  <- try @ErrorCall (event_ c "job" (simple "threw") \_ -> throwIO (ErrorCall "boom"))
         seen `logged` [Failed "failed", Failed "threw"]
 
-    , expectFail $ testCase "concurrent reacts with overlapping filters each get their events (regression)" do
+    , expectFail $ testCase "B5 concurrent reacts with overlapping filters each get their events (regression)" do
         -- The duplicate delivery only shows up under some message orderings
         replicateM_ 50 $ cleanTest \c base -> do
           seenA   <- newLog
@@ -62,7 +62,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           seenAll `logged` [Done "a", Done "b"]
           seenA   `logged` [Done "a"]
 
-    , testCase "an unsubscribed react no longer runs its handler" $ cleanTest \c base -> do
+    , testCase "B6 an unsubscribed react no longer runs its handler" $ cleanTest \c base -> do
         seenA   <- newLog
         seenAll <- newLog
 
@@ -75,7 +75,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
         seenAll `logged` [Done "a"]
         seenA   `logged` []
 
-    , testCase "unsubscribing a react keeps overlapping reacts subscribed" $ cleanTest \c base -> do
+    , testCase "B7 unsubscribing a react keeps overlapping reacts subscribed" $ cleanTest \c base -> do
         seenA   <- newLog
         seenAll <- newLog
 
@@ -88,7 +88,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
         seenAll `logged` [Done "a"]
         seenA   `logged` []
 
-    , testCase "closing the connection while events arrive doesn't throw (regression)" do
+    , testCase "B8 closing the connection while events arrive doesn't throw (regression)" do
         -- The connection is closed by withConn as soon as sending the event
         -- returns, but we may be in the middle of sending acknowledges to the
         -- 'react'. There's a race where we DISCONNECT then send more messages
@@ -112,14 +112,14 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
     ]
 
   , testGroup "persistent session"
-    [ testCase "react to a declared topic" $ persistentTest \ @job base session ->
+    [ testCase "B9 react to a declared topic" $ persistentTest \ @job base session ->
         withPersistentConn session base \c -> do
           seen <- newLog
           _    <- react c job (logTo seen)
           ()   <- event_ c "job" (simple "job") mempty
           seen `logged` [Done "job"]
 
-    , testCase "reconnects explicitly after going down with an exception" $ persistentTest \ @job base session -> do
+    , testCase "B10 reconnects explicitly after going down with an exception" $ persistentTest \ @job base session -> do
 
         r <- try @ErrorCall @() $ withPersistentConn session base \c -> do
           seen <- newLog
@@ -135,7 +135,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           () <- event_ c "job" (simple "after") mempty
           seen `logged` [Done "after"]
 
-    , expectFail $ testCase "receives events sent while it was down (regression)" $ persistentTest \ @job base session -> do
+    , expectFail $ testCase "B11 receives events sent while it was down (regression)" $ persistentTest \ @job base session -> do
 
         _ <- try @ErrorCall $ withPersistentConn session base \c -> do
           _ <- react @() c job \_ _ -> pure \_ -> pure ()
@@ -154,7 +154,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           _ <- react c job (logTo seen)
           seen `logged` [Done "offline"] -- expect to receive msg sent while offline
 
-    , testCase "pairs a start and finish received across a reconnect with same SessionData (regression)" $ persistentTest \ @job base session -> do
+    , testCase "B12 pairs a start and finish received across a reconnect with same SessionData (regression)" $ persistentTest \ @job base session -> do
 
         -- We do support matching start / finish across reconnects, as long as
         -- the 'SessionData' is re-used.
@@ -185,7 +185,53 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
             wait sending
             seen `logged` [Done "job"]
 
-    , testCase "reactOnce doesn't hang when the broker drops the connection" $ persistentTest \ @job base session -> do
+    , expectFail $ testCase "B13 just like B12, but finish is delivered while offline" $ persistentTest \ @job base session -> do
+
+        seen <- newLog
+        reconnected <- newEmptyMVar
+        withConn base \producer -> do
+
+          sending <- withPersistentConn session base \c -> do
+            _ <- react c job (logTo seen)
+            sending <- async (event_ producer "job" (simple "job") \_ -> takeMVar reconnected)
+            seen `loggedStart` "job" -- the /start reached us before going down
+            pure sending
+
+          putMVar reconnected () -- deliver finished while offline, must still match.
+          wait sending
+
+          withPersistentConn session base \c -> do
+            threadDelay 100_00
+            _ <- react c job (logTo seen)
+            seen `logged` [Done "job"]
+
+    , testCase "B14 just like B12, but brand new SessionData (so they are never paired)" $ persistentTest \ @job base session@(SPersistentSession sid _) -> do
+
+        -- The same test as above but without the same in-memory 'SessionData'.
+        -- The /start arrives (and can be saved e.g. by a dashboard), but the
+        -- /finished arrives after re-connecting and then we've already lost
+        -- the pending /start, so it is discarded and so /start never gets a
+        -- match.
+        --
+        -- **This is the contract, see 'withPersistentConn'**
+        seen <- newLog
+        reconnected <- newEmptyMVar
+        withConn base \producer -> do
+
+          sending <- withPersistentConn session base \c -> do
+            _ <- react c job (logTo seen)
+            sending <- async (event_ producer "job" (simple "job") \_ -> takeMVar reconnected)
+            seen `loggedStart` "job" -- start is delivered
+            pure sending
+
+          fresh <- newPersistentSession sid [job] -- really new; as if we're re-conn across process restart
+          withPersistentConn fresh base \c -> do
+            _ <- react c job (logTo seen)
+            putMVar reconnected ()
+            wait sending
+            seen `logged` [] -- we never get `Done` for the "job" after reconnecting (even though we /do/ in the test above)
+
+    , testCase "B15 reactOnce doesn't hang when the broker drops the connection" $ persistentTest \ @job base session -> do
 
         r <- withPersistentConn session base \c ->
           -- the broker drops a client when another connects with the same id
@@ -196,7 +242,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           Left e | isUserError e -> pure ()
           _ -> assertFailure ("expected reactOnce to fail, got: " ++ show r)
 
-    , testCase "closing a connection the broker dropped doesn't throw" $ persistentTest \ @_ base session ->
+    , testCase "B16 closing a connection the broker dropped doesn't throw" $ persistentTest \ @_ base session ->
         withPersistentConn session base \c -> do
           -- the broker drops a client when another connects with the same id
           withPersistentConn session base \_ -> pure ()
