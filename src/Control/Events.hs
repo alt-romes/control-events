@@ -103,11 +103,6 @@ data Conn (session :: SessionType) = Conn
     --
     -- We additionally evacuate pending transactions from this map when they
     -- timeout.
-    --
-    -- If there are two overlapping handlers (e.g. for trigger/# and
-    -- trigger/something), they will handle the same message. Therefore, the
-    -- map key must also include the handler filter, since otherwise the two
-    -- messages would collapse into just one on the pending map.
   }
 
 -- | A persistent session must declare upfront all topics it may ever subscribe.
@@ -144,7 +139,7 @@ data PendingTxn
   -- simply caused by an out-of-order issue.
   | PendingFinished (Timed EvtDone)
 
-type PendingMap = (Map.Map (UUID.UUID, Filter) PendingTxn)
+type PendingMap = Map.Map UUID.UUID PendingTxn
 
 data SessionData (s :: SessionType) where
   SCleanSession      :: SessionData CleanSession
@@ -311,7 +306,7 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
                , Just emsg <- decode @(Timed (EvtMsg m)) msg
                -> do
                   h_p2 <- handler (EventId uuid ttopic) emsg
-                  pair (uuid, filt) (emsg.e.rules.timeout*2)
+                  pair uuid (emsg.e.rules.timeout*2)
                           -- expected /finished according to rules.timeout
                           -- x2 to have bigger window to match a delayed pair
                           -- (the dashboard may want to display a timed-out but
@@ -320,7 +315,7 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
 
                | "finished" <- termin
                , Just edn <- decode @(Timed EvtDone) msg
-               -> pair (uuid, filt) 30 -- expect /start very soon after /finished
+               -> pair uuid 30 -- expect /start very soon after /finished
                        (PendingFinished edn)
 
                | otherwise
@@ -329,14 +324,14 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
          | otherwise
          -> pure ()
     where
-      pair (uuid, filt) timeout ptxn = do
-        atomicModifyIORef' pending (\pm -> case (Map.lookup (uuid, filt) pm, ptxn) of
+      pair uuid timeout ptxn = do
+        atomicModifyIORef' pending (\pm -> case (Map.lookup uuid pm, ptxn) of
           (Nothing, _)
-            -> (Map.insert (uuid, filt) ptxn pm, Nothing)
+            -> (Map.insert uuid ptxn pm, Nothing)
           (Just (PendingStart act),   PendingFinished dn)
-            -> (Map.delete (uuid, filt) pm, Just (act dn))
+            -> (Map.delete uuid pm, Just (act dn))
           (Just (PendingFinished dn), PendingStart act)
-            -> (Map.delete (uuid, filt) pm, Just (act dn))
+            -> (Map.delete uuid pm, Just (act dn))
           _ -> (pm, Just (pure ())) -- duplicate start or finish (impossible with QoS2)
           ) >>= \case
             Nothing -> do
@@ -351,7 +346,7 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
                 -- much later.
                 _ <- forkIO $ do
                   threadDelay (timeout*1_000_000)
-                  modifyPending (Map.delete (uuid, filt))
+                  modifyPending (Map.delete uuid)
                 pure ()
             Just runIt -> runIt
 
@@ -636,9 +631,9 @@ type EvtHandler m a = EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO a)
 -- handlers will be registered and messages delegated to the corresponding
 -- handler.
 --
--- Registering two handlers for the same topic is not supported and is
--- considered UB. Registering two handlers with overlapping topics is also UB
--- at the moment. Any given event should match at most one handler topic.
+-- However, registering two overlapping handlers for the same topic is not
+-- supported. We check and throw at runtime if you register two overlapping
+-- filters. Any given event should match at most one handler topic.
 --
 -- (The 'withConn' "base topic" is unused in 'react', since we may want to
 -- react to topics outside of the base topic we're publishing at. For instance,
@@ -719,6 +714,29 @@ react' c f h = knownFilter f $ \ @topic -> react c topic h
 -- the broker disconnects for some reason).
 waitConnDisconnect :: Conn s -> IO ()
 waitConnDisconnect Conn{..} = waitForClient connClient
+
+-- | Two 'react' filters cannot overlap. We will get 1 copy of the event per
+-- subscription, and all overlapping handlers will match against *every* copy.
+-- The 'PendingMap' invariants would also be violated.
+--
+-- Now, we could imagine using a subscription identifier property, but those
+-- are in-memory and wouldn't survive a crash. Queued messages delivered on
+-- reconnect would then be duplicate for overlapping filters without a way to
+-- avoid it.
+--
+-- Perhaps more importantly, this is a much simpler specification: no
+-- overlapping handlers. A specification for overlapping filters would be
+-- complex at best.
+--
+-- A user should just keep the more general filter and defer by topic in the
+-- handler
+overlaps :: Filter -> Filter -> Bool
+overlaps f g = go (split f) (split g) where
+  go ["#"] _ = True
+  go _ ["#"] = True
+  go [] [] = True
+  go (x:xs) (y:ys) = (x == "+" || y == "+" || x == y) && go xs ys
+  go _ _ = False
 
 --------------------------------------------------------------------------------
 -- * Subscribing in persistent connection (see SessionType)
