@@ -154,10 +154,10 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           _ <- react c job (logTo seen)
           seen `logged` [Done "offline"] -- expect to receive msg sent while offline
 
-    , expectFail $ testCase "pairs a start and finish received across a reconnect (regression)" $ persistentTest \ @job base session -> do
+    , testCase "pairs a start and finish received across a reconnect with same SessionData (regression)" $ persistentTest \ @job base session -> do
 
         -- We do support matching start / finish across reconnects, as long as
-        -- the session is re-used.
+        -- the 'SessionData' is re-used.
         --
         -- If we reconnect e.g. from a new process using the same persistent
         -- session ID but without the same in-memory session object, the /start
@@ -219,7 +219,15 @@ persistentTest :: (forall job. KnownSymbol job => Topic -> SessionData (Persiste
 persistentTest k = do
   base <- freshTopic
   sid <- UUID.toString <$> UUID.nextRandom
-  knownFilter (toFilter base <> "job") \ @job -> k @job base (SPersistentSession sid)
+  knownFilter (toFilter base <> "job") \ @job -> do
+    -- A persistent session that may or may not be shared by the connections
+    -- across a test.
+    --
+    -- We will want persistent tests to check the expected properties (see
+    -- 'withPersistentConn') both when sharing a 'SessionData' and when
+    -- re-connecting from absolute scratch.
+    prs <- newPersistentSession sid [job]
+    k @job base prs
 
 -- | Use a unique base topic per test
 freshTopic :: IO Topic

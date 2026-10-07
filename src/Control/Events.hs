@@ -7,6 +7,7 @@ module Control.Events
   -- * Establishing a connection
     withConn, withPersistentConn, Conn
   , SessionData(..), SessionType(..)
+  , newPersistentSession
   , isConnUp, waitConnDisconnect
 
   -- * Running tasks delimited by events
@@ -94,7 +95,7 @@ data Conn (session :: SessionType) = Conn
   { connClient    :: MQTTClient
   , connBaseTopic :: Topic
   , connHandlers  :: IORef (Map.Map Filter SomeEvtHandler)
-  , connPendingTx :: IORef (Map.Map (UUID.UUID, Filter) PendingTxn)
+  , connPendingTx :: IORef PendingMap
     -- ^ We can only react to completed transactions.
     -- When we receive a /start we insert the event in the map with correlation
     -- id and the IO action that runs the handler. On /finished, we pop it from
@@ -143,6 +144,21 @@ data PendingTxn
   -- simply caused by an out-of-order issue.
   | PendingFinished (Timed EvtDone)
 
+type PendingMap = (Map.Map (UUID.UUID, Filter) PendingTxn)
+
+data SessionData (s :: SessionType) where
+  SCleanSession      :: SessionData CleanSession
+  SPersistentSession :: KnownFilters topics => String -> IORef PendingMap -> SessionData (PersistentSession topics)
+  -- ^ The string is a persistent connection ID. If the connection goes down, messages meant
+  -- for this listener will be queued and delivered when we reconnect using the
+  -- same ID.
+
+-- | Create a persistent session 'SessionData' from the persistent identifier
+-- for this session. See 'withPersistentConn' for more details about sharing
+-- this 'SessionData' across reconnects.
+newPersistentSession :: String -> forall topics -> KnownFilters topics => IO (SessionData (PersistentSession topics))
+newPersistentSession persistId topics = SPersistentSession @topics persistId <$> newIORef Map.empty
+
 -- | Open a connection to the broker for this service to send events.
 -- The 'Topic' argument is used as the base topic for events sent within this
 -- connection, so it should represent the service or type rather than any
@@ -154,13 +170,6 @@ withConn :: forall r
          -> (Conn CleanSession -> IO r)
          -> IO r
 withConn = withPersistentConn SCleanSession
-
-data SessionData (s :: SessionType) where
-  SCleanSession      :: SessionData CleanSession
-  SPersistentSession :: KnownFilters topics => String -> SessionData (PersistentSession topics)
-  -- ^ The string is a persistent connection ID. If the connection goes down, messages meant
-  -- for this listener will be queued and delivered when we reconnect using the
-  -- same ID.
 
 -- | Like 'withConn', but the session is persistent, so messages meant for it
 -- are queued even if we are offline, and delivered on reconnect.
@@ -217,12 +226,15 @@ withPersistentConn
   -> IO r
 withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker where
 
-  mbyID = case sd of SCleanSession          -> Nothing
-                     SPersistentSession sid -> Just sid
+  mbyID = case sd of SCleanSession            -> Nothing
+                     SPersistentSession sid _ -> Just sid
 
   connectBroker = do
+    pendingRef <- case sd of
+      SCleanSession           -> newIORef Map.empty
+      SPersistentSession _ pr -> pure pr
+
     handlersRef <- newIORef Map.empty
-    pendingRef  <- newIORef Map.empty
     let
       Just uri = parseURI $ "mqtt://127.0.0.1" ++ maybe "" ('#':) mbyID
                   -- the _connID is parsed from the URI on `connectURI`.
@@ -345,8 +357,8 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
 
       topicsTerm :: [Filter]
       topicsTerm = case sd of
-        SPersistentSession @topics _ -> reifyFilters (Proxy @topics)
-        SCleanSession                -> []
+        SPersistentSession @topics _ _ -> reifyFilters (Proxy @topics)
+        SCleanSession                  -> []
 
 isConnUp :: Conn s -> STM Bool
 isConnUp Conn{connClient} = isConnectedSTM connClient
