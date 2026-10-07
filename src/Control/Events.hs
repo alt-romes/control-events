@@ -165,12 +165,51 @@ data SessionData (s :: SessionType) where
 -- | Like 'withConn', but the session is persistent, so messages meant for it
 -- are queued even if we are offline, and delivered on reconnect.
 --
--- TODO: Explain carefully list of properties achieved from persistent session exactly.
--- Namely: safety when re-connecting within the same process sharing the
--- pending list (in-process state), safety when re-connecting across different
--- processes (lose start/finish pairing -- fine, we'll see failed start, but
--- reconnecting across start/finish should be very rare), and what happens to
--- queued messages from the broker in both cases.
+-- == Persistent sessions in detail
+--
+-- If a "persistent connection" fails and is disconnected, we are guaranteed a
+-- few properties if we re-connect (calling 'withPersistentConn' again) using
+-- the same persistent session identifier.
+--
+-- __The main property__: any "delimited events" sent to the broker while we were
+-- disconnected, under topics that we were subscribed to then, are delivered
+-- when we re-register the 'react' handlers for those topics after we reconnect
+-- (new 'withPersistentConn'). This is guaranteed without re-using any state at
+-- all across the two 'withPersistentConn' sessions, i.e. if we have a process
+-- crash during a persistent session, and launch a *brand new* process using
+-- the same persistent identifier, for each 'react' handler we register, the
+-- handler will run for all messages that were queued while we were offline.
+--
+-- __The delimited property__: if a "delimited event" was halfway through when
+-- the connection goes down, i.e. we had received a /start MQTT event, but not
+-- yet a /finished one, then we might still be able to match the /finished to
+-- the /start after reconnecting. There are two scenarios:
+--
+--   * In-process reconnect: given @session <- 'newPersistentSession' "my-persistent-id"@,
+--   if we re-connect @'withPersistentConn' session@ where @session@ is the
+--   same session used for the previous connection which crashed, then the,
+--   when the /finished event (that was sent while we were offline) is
+--   delivered, we can still match it against the /start that had arrived
+--   before us going down, and the full delimited-event is reacted to.
+--
+--   * Across-process reconnect: if we reconnect to the persistent session with
+--   a brand new 'newPersistentSesion' (e.g. on a fresh process), then we won't
+--   be able to match the /finished MQTT event (which will be delivered on
+--   reconnect) with anything, and we'll throw it away. So, an unrecoverable
+--   crash in between receiving the /start and /finished will result in the
+--   event being invalidated out because /finished was discarded.
+--
+-- Put simply, a crash between /start and /finished will not affect the
+-- delivery of the full event if the @SessionData@ is shared across the
+-- persistent sessions; if the data can't be shared across re-connects, then a
+-- crash between /start and /finished means the event transaction won't
+-- complete, and the event will be considered invalid. This is fine -- this is
+-- exactly why we have delimiting events. In the unlikely case there's an
+-- unrecoverable crash between a /start and /finished, that event will be invalid
+-- and will be flagged as such (even if it might be completed).
+--
+-- In other words, it's sound to not match /start and /finished across fresh
+-- re-connects, even if it's not complete.
 withPersistentConn
   :: SessionData s
   -> Topic
