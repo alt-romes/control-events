@@ -154,6 +154,22 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           _ <- react c job (logTo seen)
           seen `logged` [Done "offline"] -- expect to receive msg sent while offline
 
+    , expectFail $ testCase "B11b is B11, but with FRESH SessionData" $ persistentTest \ @job base session@(SPersistentSession sid _) -> do
+
+        _ <- try @ErrorCall $ withPersistentConn session base \c -> do
+          _ <- react @() c job \_ _ -> pure \_ -> pure ()
+          throwIO (ErrorCall "going down")
+
+        withConn base \c -> event_ c "job" (simple "offline") \_ -> pure ()
+
+        fresh <- newPersistentSession sid [job] -- really new; as if we're re-conn across process restart
+        withPersistentConn fresh base \c -> do
+          threadDelay 100_000
+          seen <- newLog
+          _ <- react c job (logTo seen)
+          -- expect to receive msg sent while offline, **even with brand new SessionData**
+          seen `logged` [Done "offline"]
+
     , testCase "B12 pairs a start and finish received across a reconnect with same SessionData (regression)" $ persistentTest \ @job base session -> do
 
         -- We do support matching start / finish across reconnects, as long as
