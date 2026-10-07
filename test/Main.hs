@@ -6,6 +6,7 @@ import Control.Concurrent.STM
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
+import Data.Either
 import Data.List (sort)
 import Data.Maybe
 import GHC.TypeLits (KnownSymbol)
@@ -50,17 +51,11 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
         _  <- try @ErrorCall (event_ c "job" (simple "threw") \_ -> throwIO (ErrorCall "boom"))
         seen `logged` [Failed "failed", Failed "threw"]
 
-    , expectFail $ testCase "B5 concurrent reacts with overlapping filters each get their events (regression)" do
-        -- The duplicate delivery only shows up under some message orderings
-        replicateM_ 50 $ cleanTest \c base -> do
-          seenA   <- newLog
-          seenAll <- newLog
-          _  <- react' c (base <> "a") (logTo seenA)
-          _  <- react' c (base <> "#") (logTo seenAll)
-          () <- event_ c "a" (simple "a") mempty
-          () <- event_ c "b" (simple "b") mempty
-          seenAll `logged` [Done "a", Done "b"]
-          seenA   `logged` [Done "a"]
+    , testCase "B5 reacting with overlapping filters throws OverlappingFilterException" $ cleanTest \c base -> do
+        _ <- react' @() c (base <> "a") mempty
+        r <- try @OverlappingFilterException $
+             react' @() c (base <> "#") mempty
+        assertBool "expected OverlappingFilterException" (isLeft r)
 
     , testCase "B6 an unsubscribed react no longer runs its handler" $ cleanTest \c base -> do
         seenA   <- newLog
@@ -71,19 +66,6 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
 
         _  <- react' c (base <> "#") (logTo seenAll)
         () <- event_ c "a" (simple "a") mempty
-
-        seenAll `logged` [Done "a"]
-        seenA   `logged` []
-
-    , testCase "B7 unsubscribing a react keeps overlapping reacts subscribed" $ cleanTest \c base -> do
-        seenA   <- newLog
-        seenAll <- newLog
-
-        _      <- react' c (base <> "#") (logTo seenAll)
-        unsubA <- react' c (base <> "a") (logTo seenA)
-        unsubA
-
-        event_ c "a" (simple "a") \_ -> pure ()
 
         seenAll `logged` [Done "a"]
         seenA   `logged` []

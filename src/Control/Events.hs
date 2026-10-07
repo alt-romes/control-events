@@ -25,6 +25,8 @@ module Control.Events
   , done, failed
   , withResult, withTriggers
 
+  , OverlappingFilterException(..)
+
   -- ** Rules
   , Rules(..)
   , evtTimeout, evtExpected
@@ -649,7 +651,16 @@ react :: forall m s. Conn s
 react (Conn mc _conn_base handlersRef _) topic h = sub >> return unsub
   where
     sub = do
-      atomicModifyIORef' handlersRef (\m -> (Map.insert f (SomeEvtHandler h) m, ()))
+      -- Detect overlapping filters at runtime to throw.
+      -- See 'overlaps'.
+      bad <- atomicModifyIORef' handlersRef (\m ->
+        let bad = any (overlaps f) (Map.keys m)
+         in (if bad then m else Map.insert f (SomeEvtHandler h) m, bad))
+
+      when bad $
+        Map.keys <$> readIORef handlersRef
+          >>= throwIO . OverlappingFilterException f
+
       (merrs, _) <- subscribe mc (map (,sub_opts) tfs) []
       case lefts merrs of
         []   -> pure ()
@@ -737,6 +748,13 @@ overlaps f g = go (split f) (split g) where
   go [] [] = True
   go (x:xs) (y:ys) = (x == "+" || y == "+" || x == y) && go xs ys
   go _ _ = False
+
+data OverlappingFilterException = OverlappingFilterException Filter [Filter] deriving Show
+instance Exception OverlappingFilterException where
+  displayException (OverlappingFilterException f fs) =
+    "OverlappingFilterException: filter " ++ show f ++
+    " overlaps with existing filters " ++ show fs ++
+    ".\nRegistering overlapping filters is not supported."
 
 --------------------------------------------------------------------------------
 -- * Subscribing in persistent connection (see SessionType)
