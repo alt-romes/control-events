@@ -12,6 +12,8 @@
 -- /finished event to a matching /start indicates an unrecoverable failure
 -- happened (e.g. a system crash, power outage).
 --
+-- == /Event Delivery Guarantees/
+--
 -- On the publisher side, the delimited approach means the receivers will
 -- always know if something went wrong, as long as we can get a /start sent.
 -- If the process crashes before sending the /start, we won't be able to know
@@ -33,6 +35,12 @@
 -- handlers being registered with 'react', the messages will never be delivered
 -- to the handler and will be lost forever. If they had been delivered but the
 -- handler crashed right away as above, same thing.
+--
+-- An approach to mitigate and detect these crashes is to have long running
+-- processes send a healthcheck event periodically (see 'Control.Events.Healthcheck')
+-- to a main dashboard process (which runs the event 'Rules', like 'expected'),
+-- potentially with a list of expected healthcheck services, and have a an
+-- external service monitoring that main process.
 --
 -- All in all, the library guarantees reliable delivery of delimited events,
 -- but it is not 100% in the presence of system crashes or power outages. If
