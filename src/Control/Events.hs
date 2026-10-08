@@ -155,6 +155,9 @@ data SessionData (s :: SessionType) where
 -- this 'SessionData' across reconnects.
 newPersistentSession :: String -> forall topics -> KnownFilters topics => IO (SessionData (PersistentSession topics))
 newPersistentSession persistId topics = SPersistentSession @topics persistId <$> newIORef Map.empty
+  -- TODO: should the persistent session also keep the message queue? in case
+  -- we crash immediately after reading the pending notifications but before
+  -- they can be read by a handler?
 
 -- | Open a connection to the broker for this service to send events.
 -- The 'Topic' argument is used as the base topic for events sent within this
