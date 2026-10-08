@@ -2,6 +2,60 @@
              OverloadedStrings, OverloadedRecordDot, DeriveAnyClass,
              RecordWildCards #-}
 {-# OPTIONS_GHC -Wno-orphans #-} -- JSON Topic
+
+-- | Send and react to delimited events
+--
+-- A delimited event delimits the execution of a certain action. A /start event
+-- is published before starting the action, and a /finished event is published
+-- after the action is complete. A /finished event can report success or
+-- failure (e.g. wrong value, or an exception was raised). The lack of a
+-- /finished event to a matching /start indicates an unrecoverable failure
+-- happened (e.g. a system crash, power outage).
+--
+-- On the publisher side, the delimited approach means the receivers will
+-- always know if something went wrong, as long as we can get a /start sent.
+-- If the process crashes before sending the /start, we won't be able to know
+-- the process even attempted to run, unless there is an external check
+-- expecting a certain /start to happen at a particular time.
+--
+-- On the broker side, when it receives published events, it queues them for
+-- persistent sessions that are currently disconnected. The broker saves these
+-- queued messages every 5 minutes (configurable, even autosave_on_change). If
+-- there's a hard crash on the broker process or entire system, the queued
+-- messages will be lost forever.
+--
+-- On the receiver side, if there's a system-level/whole process crash between
+-- the message being delivered to the handler and the handler beginning to do
+-- anything with it, the message (e.g a /start) will be lost forever (the
+-- broker will consider it delivered too).
+-- On re-connecting a persistent session, as a specific instance of the above,
+-- if there's a hard crash between the queued messages arriving and the
+-- handlers being registered with 'react', the messages will never be delivered
+-- to the handler and will be lost forever. If they had been delivered but the
+-- handler crashed right away as above, same thing.
+--
+-- All in all, the library guarantees reliable delivery of delimited events,
+-- but it is not 100% in the presence of system crashes or power outages. If
+-- exactly once handling of messages across processes and network can never
+-- ever absolutely fail, no matter how tiny the chance (MISSION CRITICAL), this
+-- library isn't right for you (and prolly neither is MQTT and message brokers,
+-- you need atomic guarantees end-to-end).
+--
+-- If you need a reliable and ergonomic library for sending and reacting to
+-- events across a distributed system, with simplicity yet delivery guarantees
+-- over 99% of the time, dynamic registering of handlers, with delimited events
+-- with rules providing a good way to monitor the sending actions and making it
+-- easy to react only to events that completed, then this is a fairly good
+-- library for that.
+--
+-- It was originally designed, and is currently used, for __controlling__ and
+-- __monitoring__ various long-running system processes or one-shot
+-- {manual,scheduled} scripts across machines via a dashboard reacting to '#'.
+-- Integrating these events into most of my system processes gives me an
+-- overview of my systems, notifies me of issues, I can run some announced
+-- available actions manually (e.g. to unblock automations), and have chain of
+-- reactions be triggered across processes or automations that react to certain
+-- known events in the system.
 module Control.Events
   (
   -- * Establishing a connection
@@ -155,9 +209,6 @@ data SessionData (s :: SessionType) where
 -- this 'SessionData' across reconnects.
 newPersistentSession :: String -> forall topics -> KnownFilters topics => IO (SessionData (PersistentSession topics))
 newPersistentSession persistId topics = SPersistentSession @topics persistId <$> newIORef Map.empty
-  -- TODO: should the persistent session also keep the message queue? in case
-  -- we crash immediately after reading the pending notifications but before
-  -- they can be read by a handler?
 
 -- | Open a connection to the broker for this service to send events.
 -- The 'Topic' argument is used as the base topic for events sent within this
@@ -180,10 +231,10 @@ withConn = withPersistentConn SCleanSession
 -- few properties if we re-connect (calling 'withPersistentConn' again) using
 -- the same persistent session identifier.
 --
--- __The main property__: any "delimited events" sent to the broker while we were
+-- __The main property__: any events sent to the broker while we were
 -- disconnected, under topics that we were subscribed to then, are delivered
 -- when we re-register the 'react' handlers for those topics after we reconnect
--- (new 'withPersistentConn')[1]. This is guaranteed without re-using any state at
+-- (new 'withPersistentConn')[1]. This is guaranteed[2] without re-using any state at
 -- all across the two 'withPersistentConn' sessions, i.e. if we have a process
 -- crash during a persistent session, and launch a *brand new* process using
 -- the same persistent identifier, for each 'react' handler we register, the
@@ -196,7 +247,7 @@ withConn = withPersistentConn SCleanSession
 --
 --   * In-process reconnect: given @session <- 'newPersistentSession' "my-persistent-id"@,
 --   if we re-connect @'withPersistentConn' session@ where @session@ is the
---   same session used for the previous connection which crashed, then the,
+--   same session used for the previous connection which crashed, then,
 --   when the /finished event (that was sent while we were offline) is
 --   delivered, we can still match it against the /start that had arrived
 --   before us going down, and the full delimited-event is reacted to.
@@ -206,19 +257,13 @@ withConn = withPersistentConn SCleanSession
 --   be able to match the /finished MQTT event (which will be delivered on
 --   reconnect) with anything, and we'll throw it away. So, an unrecoverable
 --   crash in between receiving the /start and /finished will result in the
---   event being invalidated out because /finished was discarded.
+--   event being lost because /finished was discarded[3].
 --
 -- Put simply, a crash between /start and /finished will not affect the
 -- delivery of the full event if the @SessionData@ is shared across the
 -- persistent sessions; if the data can't be shared across re-connects, then a
 -- crash between /start and /finished means the event transaction won't
--- complete, and the event will be considered invalid. This is fine -- this is
--- exactly why we have delimiting events. In the unlikely case there's an
--- unrecoverable crash between a /start and /finished, that event will be invalid
--- and will be flagged as such (even if it might be completed).
---
--- In other words, it's sound to not match /start and /finished across fresh
--- re-connects, even if it's not complete.
+-- complete and the /finished lost.
 --
 -- [1] To be clear, the handlers for the persistent session messages delivered
 -- on re-connect are /not/ run on re-connect. They are only run after being
@@ -227,6 +272,22 @@ withConn = withPersistentConn SCleanSession
 -- dynamically, and it would be at best surprising if on re-connect handlers
 -- started running before being registered again. It also wouldn't be possible
 -- across connections that can't re-use the same persistent 'SessionData'.
+--
+-- [2] The exactly once delivery guarantees don't hold in all events of
+-- system crashes or power outage. For instance, if there's a system crash
+-- immediately after a /start event starts getting handled by a 'react', but
+-- before the handler does anything. See the module header for a comprehensive
+-- overview of how a message might not be delivered in certain system-level
+-- crash dependent scenarios. Guaranteed delivery isn't entirely unachievable,
+-- but would lead to a much much more complicated library (e.g. where the acks
+-- are point to point and databases abound etc). This library can be used
+-- for most cases where events are useful, as long as a very very tiny chance
+-- of losing a /start is not *mission critical*.
+--
+-- [3] That said, an application or watchdog dashboard could have stored the
+-- /start as it arrived, so that the lack of /finished on re-connect simply
+-- shows as a timed out/invalidated event, like others where there's a /start
+-- without a /finish (even if it might have completed).
 withPersistentConn
   :: SessionData s
   -> Topic
