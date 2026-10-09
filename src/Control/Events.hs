@@ -520,6 +520,18 @@ data EvtDone = EvtDone
     -- Each announced trigger is only meant to be used once. It would be
     -- surprising if there's some action we can do repeatedly but only is
     -- announced after a certain event: we assume all triggers are one-shot.
+    --
+    -- TODO: This list of triggers assumes they are conjunctive. We might
+    -- imagine disjunction too, where triggering one trigger manually
+    -- invalidates the others. We probably don't want to go as far as having a
+    -- tree of conjunctions and disjunctions. Just allowing one of disjunction
+    -- vs conjunction for the announced triggers is probably enough, and a tree
+    -- can be implemented by reacting to a disjunctive trigger with a follow up
+    -- announcement of many conjunctive triggers and so on.
+    -- Design: something like NoTriggers | ConjunctiveTriggers [Trigger] | DisjunctiveTriggers [Trigger]?
+    -- but at that point why not just the full blown tree :)
+    -- it would still be recursive in nature, and thus easy to handle in the
+    -- rules engine/dashboard.
   }
   deriving stock Generic
   deriving anyclass (ToJSON, FromJSON)
