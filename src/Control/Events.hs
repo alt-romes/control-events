@@ -158,15 +158,9 @@ trigger = fromJust (mkTopic "trigger")
 data Conn (session :: SessionType) = Conn
   { connClient    :: MQTTClient
   , connBaseTopic :: Topic
-  , connHandlers  :: IORef (Map.Map Filter SomeEvtHandler)
+  , connHandlers  :: TVar (Map.Map Filter SomeEvtHandler)
+  , connQueuedMs  :: TVar MsgQueue
   , connPendingTx :: IORef PendingMap
-    -- ^ We can only react to completed transactions.
-    -- When we receive a /start we insert the event in the map with correlation
-    -- id and the IO action that runs the handler. On /finished, we pop it from
-    -- the map and actually run the handler.
-    --
-    -- We additionally evacuate pending transactions from this map when they
-    -- timeout.
   }
 
 -- | A persistent session must declare upfront all topics it may ever subscribe.
@@ -203,20 +197,49 @@ data PendingTxn
   -- simply caused by an out-of-order issue.
   | PendingFinished (Timed EvtDone)
 
+-- | We react to events in two stages: when the first /start arrives, and to
+-- completed transactions (on a /finished with a matching /start).
+--
+-- When we receive a /start, after the first stage, we insert the event in the
+-- map with correlation id and the IO action that runs the handler on
+-- completion. On /finished, we pop it from the map and actually run the
+-- "completed txn" handler.
+--
+-- We additionally evacuate pending transactions from this map when they
+-- timeout.
 type PendingMap = Map.Map UUID.UUID PendingTxn
 
+-- | A queue of messages represented by the action which runs the given handler
+-- on the queued message if the given filter matches that queued message. The
+-- action returns @True@ if the filter matched the message (if so, we must
+-- remove from the msg/action queue). Enqueue new messages at the head, take
+-- older messages from tail (last is oldest)
+type MsgQueue = [Filter -> SomeEvtHandler -> IO Bool]
+
 data SessionData (s :: SessionType) where
-  SCleanSession      :: SessionData CleanSession
-  SPersistentSession :: KnownFilters topics => String -> IORef PendingMap -> SessionData (PersistentSession topics)
-  -- ^ The string is a persistent connection ID. If the connection goes down, messages meant
-  -- for this listener will be queued and delivered when we reconnect using the
-  -- same ID.
+  SCleanSession
+    :: SessionData CleanSession
+  SPersistentSession
+    :: KnownFilters topics
+    => String
+    -- ^ The string is a persistent connection ID. If the connection goes down, messages meant
+    -- for this listener will be queued and delivered when we reconnect using the
+    -- same ID.
+    -> IORef PendingMap
+    -- ^ A reference to the pending /start,/finished events to re-use across
+    -- same-process persistent session (so we can still match a /finished on
+    -- re-connected to a /start from the previous connection)
+    -> TVar MsgQueue
+    -- ^ A reference to the msg queue re-used across same-process persistent
+    -- sessions (so we can still deliver queued messages if we happen to
+    -- disconnect before handling them all)
+    -> SessionData (PersistentSession topics)
 
 -- | Create a persistent session 'SessionData' from the persistent identifier
 -- for this session. See 'withPersistentConn' for more details about sharing
 -- this 'SessionData' across reconnects.
 newPersistentSession :: String -> forall topics -> KnownFilters topics => IO (SessionData (PersistentSession topics))
-newPersistentSession persistId topics = SPersistentSession @topics persistId <$> newIORef Map.empty
+newPersistentSession persistId topics = SPersistentSession @topics persistId <$> newIORef Map.empty <*> newTVarIO Seq.empty
 
 -- | Open a connection to the broker for this service to send events.
 -- The 'Topic' argument is used as the base topic for events sent within this
@@ -303,20 +326,24 @@ withPersistentConn
   -> IO r
 withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker where
 
-  mbyID = case sd of SCleanSession            -> Nothing
-                     SPersistentSession sid _ -> Just sid
+  mbyID = case sd of SCleanSession              -> Nothing
+                     SPersistentSession sid _ _ -> Just sid
 
   connectBroker = do
     pendingRef <- case sd of
-      SCleanSession           -> newIORef Map.empty
-      SPersistentSession _ pr -> pure pr
+      SCleanSession             -> newIORef Map.empty
+      SPersistentSession _ pr _ -> pure pr
 
-    handlersRef <- newIORef Map.empty
+    msgQueue <- case sd of
+      SCleanSession             -> newTVarIO Seq.empty
+      SPersistentSession _ _ qm -> pure qm
+
+    handlersRef <- newTVarIO Map.empty
     let
       Just uri = parseURI $ "mqtt://127.0.0.1" ++ maybe "" ('#':) mbyID
                   -- the _connID is parsed from the URI on `connectURI`.
       config = mqttConfig
-        { _msgCB = globalMsgCallback handlersRef pendingRef
+        { _msgCB = globalMsgCallback handlersRef pendingRef msgQueue
         , _cleanSession = case mbyID of
               Nothing -> True  -- no persistence, do clean session
               Just _  -> False -- keep msgs the meant for a client which is offline
@@ -342,6 +369,7 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
       , connBaseTopic = serviceTopic
       , connHandlers  = handlersRef
       , connPendingTx = pendingRef
+      , connQueuedMs  = msgQueue
       }
 
   -- must send DISCONNECT before exiting, otherwise LWT triggers
@@ -364,40 +392,71 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
           e -> throwIO e
       ]
 
-  globalMsgCallback handlers pending = SimpleCallback $ \_c topic msg props -> do
-    -- TODO: the default handlers should queue messages we get on connect and
-    -- relay them to the subscribers as they come when using a persistent
-    -- session.
-    hs <- readIORef handlers
-    -- Try all the handlers
-    forM_ (Map.toList hs) $ \(filt, SomeEvtHandler @m handler) ->
-      if | Just ttopic <- txnTopic topic
+  globalMsgCallback handlers pending msgQueue = SimpleCallback $ \_c topic msg props -> do
+    hs <- readTVarIO handlers
+
+    let
+      -- Try matching a filter and handler against the received message, and
+      -- run the handler if it does match. Returns @True@ if the handler matched.
+      tryRunHandler filt (SomeEvtHandler @m handler)
+         | Just ttopic <- txnTopic topic
          , match filt ttopic
          , [i]       <- mapMaybe corrData props
          , Just uuid <- UUID.fromLazyASCIIBytes i
          , let termin = last (split topic)
-         -> if | "start" <- termin
-               , Just emsg <- decode @(Timed (EvtMsg m)) msg
-               -> do
-                  h_p2 <- handler (EventId uuid ttopic) emsg
-                  pair uuid (emsg.e.rules.timeout*2)
-                          -- expected /finished according to rules.timeout
-                          -- x2 to have bigger window to match a delayed pair
-                          -- (the dashboard may want to display a timed-out but
-                          -- received later /finished)
-                       (PendingStart h_p2)
+         = if | "start" <- termin
+              , Just emsg <- decode @(Timed (EvtMsg m)) msg
+              -> do
+                 h_p2 <- handler (EventId uuid ttopic) emsg
+                 pair uuid (emsg.e.rules.timeout*2)
+                         -- expected /finished according to rules.timeout
+                         -- x2 to have bigger window to match a delayed pair
+                         -- (the dashboard may want to display a timed-out but
+                         -- received later /finished)
+                      (PendingStart h_p2)
+                 return True
 
-               | "finished" <- termin
-               , Just edn <- decode @(Timed EvtDone) msg
-               -> pair uuid 30 -- expect /start very soon after /finished
-                       (PendingFinished edn)
+              | "finished" <- termin
+              , Just edn <- decode @(Timed EvtDone) msg
+              -> do
+                 pair uuid 30 -- expect /start very soon after /finished
+                      (PendingFinished edn)
+                 return True
 
-               | otherwise
-               -> pure ()
+              | otherwise
+              -> return False
 
          | otherwise
-         -> pure ()
+         = return False
+
+    -- Try all the handlers, and run the single one which matches
+    handlerMatches <- mapM (uncurry tryRunHandler) (Map.toList hs)
+
+    -- When we reconnect on a persistent session, the queued messages will be
+    -- delivered straight away. If none of the handlers match for a message we
+    -- are receiving (we only receive messages we are subscribed to, or were
+    -- subscribed to when the persistent session disconnected), then we queue
+    -- them up. We deliver them when the matching subscription is registered
+    -- with 'react' (recall we don't support overlapping filters, so a topic
+    -- can only match one handler, and we deliver it to the one which does).
+    --
+    -- ('react' ensures atomically the handler will only run on new messages
+    -- after the pending queue is processed in order, to prefer delivering
+    -- older messages in order despite SimpleCallback not guaranteeing order)
+    when (all (==False) handlerMatches) $ do
+      case sd of
+        SCleanSession
+          -- This is a clean session, so any messages no current handlers match
+          -- are just ignored. I think it may happen if unsubscribe and the
+          -- broker delivering a msg race.
+          -> pure ()
+        SPersistentSession{}-> do
+          -- tryRunHandler captures this msg, topic, and props.
+          -- On a 'react' which matches and runs it, remove from the queue
+          modifyTVar msgQueue (tryRunHandler:) & atomically
+
     where
+
       pair uuid timeout ptxn = do
         atomicModifyIORef' pending (\pm -> case (Map.lookup uuid pm, ptxn) of
           (Nothing, _)
@@ -412,12 +471,10 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
                 -- Remove this pending entry from the map after the timeout.
                 -- If there was already a match, Map.delete uuid will be a no-op.
                 --
-                -- TODO: We should provide a way of handling /finished events
-                -- that arrive after the timeout or on their own. Using react,
-                -- we will lose all events that are finished beyond their
-                -- timeout or across restarts, whereas when the dashboard was
-                -- doing this manually it registered a /finished that arrived
-                -- much later.
+                -- TODO: Should we provide a way of handling /finished events
+                -- that arrive after the timeout or on their own? Using react,
+                -- we will lose all events that are /finished beyond their
+                -- timeout or across restarts
                 _ <- forkIO $ do
                   threadDelay (timeout*1_000_000)
                   modifyPending (Map.delete uuid)
@@ -434,8 +491,8 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
 
       topicsTerm :: [Filter]
       topicsTerm = case sd of
-        SPersistentSession @topics _ _ -> reifyFilters (Proxy @topics)
-        SCleanSession                  -> []
+        SPersistentSession @topics _ _ _ -> reifyFilters (Proxy @topics)
+        SCleanSession                    -> []
 
 isConnUp :: Conn s -> STM Bool
 isConnUp Conn{connClient} = isConnectedSTM connClient
@@ -635,7 +692,7 @@ evtCritical = lens (\s -> s.rules.critical) (\s b -> s{rules = s.rules{critical 
 
 -- | Send a delimited "transactional" event
 event :: (ToJSON m) => Conn s -> Topic -> EvtMsg m -> (EventId -> IO (EvtDone, r)) -> IO r
-event (Conn mc conn_base _ _) topic edt k = do
+event Conn{connClient=mc, connBaseTopic=conn_base} topic edt k = do
   mask $ \restore -> do
     eid <- startEvent
     (dn, r)
@@ -700,7 +757,8 @@ type EvtHandler m a = EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO a)
 --
 -- For every message that arrives matching this topic, we try to decode it as
 -- an @EvtMsg m@ and pass it to the given handler. If decoding fails, the msg
--- is ignored.
+-- is ignored. The order in which messages arrive is likely the order in which
+-- they were sent, but ordering is not guaranteed.
 --
 -- The return value is an action to unsubscribe and unregister this handler. It
 -- needn't ever be run.
@@ -732,17 +790,26 @@ react :: forall m s. Conn s
       -> IO (IO ())
       -- ^ Returns the action to unsubscribe and unregister this handler for
       -- this topic
-react (Conn mc _conn_base handlersRef _) topic h = sub >> return unsub
+react Conn{connClient=mc, connHandlers, connQueuedMs} topic h = sub >> return unsub
+
   where
     sub = do
       -- Detect overlapping filters at runtime to throw.
       -- See 'overlaps'.
-      bad <- atomicModifyIORef' handlersRef (\m ->
+      bad <- atomically $ do
+        m <- readTVar connHandlers
         let bad = any (overlaps f) (Map.keys m)
-         in (if bad then m else Map.insert f (SomeEvtHandler h) m, bad))
+        when (not bad) $ do
+          -- Atomically ensure there are no queued msgs, otherwise mark handler
+          -- as not ready. The registered handler blocks on new messages until it is marked ready.
+          definitelyReady <- isEmptyTQueue connQueuedMs
+          writeTVar connHandlers $
+            Map.insert f (SomeEvtHandler {-TODO: Atomically check if ready, otherwise wait -} h) m
+        pure bad
+        -- TODO: Clear queue until empty
 
       when bad $
-        Map.keys <$> readIORef handlersRef
+        Map.keys <$> readTVarIO connHandlers
           >>= throwIO . OverlappingFilterException f
 
       (merrs, _) <- subscribe mc (map (,sub_opts) tfs) []
