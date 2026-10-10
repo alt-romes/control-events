@@ -158,15 +158,9 @@ trigger = fromJust (mkTopic "trigger")
 data Conn (session :: SessionType) = Conn
   { connClient    :: MQTTClient
   , connBaseTopic :: Topic
-  , connHandlers  :: IORef (Map.Map Filter SomeEvtHandler)
+  , connHandlers  :: TVar (Map.Map Filter SomeEvtHandler)
+  , connQueuedMs  :: TVar MsgQueue
   , connPendingTx :: IORef PendingMap
-    -- ^ We can only react to completed transactions.
-    -- When we receive a /start we insert the event in the map with correlation
-    -- id and the IO action that runs the handler. On /finished, we pop it from
-    -- the map and actually run the handler.
-    --
-    -- We additionally evacuate pending transactions from this map when they
-    -- timeout.
   }
 
 -- | A persistent session must declare upfront all topics it may ever subscribe.
@@ -203,20 +197,47 @@ data PendingTxn
   -- simply caused by an out-of-order issue.
   | PendingFinished (Timed EvtDone)
 
+-- | We react to events in two stages: when the first /start arrives, and to
+-- completed transactions (on a /finished with a matching /start).
+--
+-- When we receive a /start, after the first stage, we insert the event in the
+-- map with correlation id and the IO action that runs the handler on
+-- completion. On /finished, we pop it from the map and actually run the
+-- "completed txn" handler.
+--
+-- We additionally evacuate pending transactions from this map when they
+-- timeout.
 type PendingMap = Map.Map UUID.UUID PendingTxn
 
+-- | A queue of messages represented by the topic and the action to runs on a
+-- registered handler whose filter 'match'es the topic. Enqueue new messages at
+-- the head, take older messages from tail (last is oldest)
+type MsgQueue = [(Topic, SomeEvtHandler -> IO ())]
+
 data SessionData (s :: SessionType) where
-  SCleanSession      :: SessionData CleanSession
-  SPersistentSession :: KnownFilters topics => String -> IORef PendingMap -> SessionData (PersistentSession topics)
-  -- ^ The string is a persistent connection ID. If the connection goes down, messages meant
-  -- for this listener will be queued and delivered when we reconnect using the
-  -- same ID.
+  SCleanSession
+    :: SessionData CleanSession
+  SPersistentSession
+    :: KnownFilters topics
+    => String
+    -- ^ The string is a persistent connection ID. If the connection goes down, messages meant
+    -- for this listener will be queued and delivered when we reconnect using the
+    -- same ID.
+    -> IORef PendingMap
+    -- ^ A reference to the pending /start,/finished events to re-use across
+    -- same-process persistent session (so we can still match a /finished on
+    -- re-connected to a /start from the previous connection)
+    -> TVar MsgQueue
+    -- ^ A reference to the msg queue re-used across same-process persistent
+    -- sessions (so we can still deliver queued messages if we happen to
+    -- disconnect before handling them all)
+    -> SessionData (PersistentSession topics)
 
 -- | Create a persistent session 'SessionData' from the persistent identifier
 -- for this session. See 'withPersistentConn' for more details about sharing
 -- this 'SessionData' across reconnects.
 newPersistentSession :: String -> forall topics -> KnownFilters topics => IO (SessionData (PersistentSession topics))
-newPersistentSession persistId topics = SPersistentSession @topics persistId <$> newIORef Map.empty
+newPersistentSession persistId topics = SPersistentSession @topics persistId <$> newIORef Map.empty <*> newTVarIO []
 
 -- | Open a connection to the broker for this service to send events.
 -- The 'Topic' argument is used as the base topic for events sent within this
@@ -303,20 +324,24 @@ withPersistentConn
   -> IO r
 withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker where
 
-  mbyID = case sd of SCleanSession            -> Nothing
-                     SPersistentSession sid _ -> Just sid
+  mbyID = case sd of SCleanSession              -> Nothing
+                     SPersistentSession sid _ _ -> Just sid
 
   connectBroker = do
     pendingRef <- case sd of
-      SCleanSession           -> newIORef Map.empty
-      SPersistentSession _ pr -> pure pr
+      SCleanSession             -> newIORef Map.empty
+      SPersistentSession _ pr _ -> pure pr
 
-    handlersRef <- newIORef Map.empty
+    msgQueue <- case sd of
+      SCleanSession             -> newTVarIO []
+      SPersistentSession _ _ qm -> pure qm
+
+    handlersRef <- newTVarIO Map.empty
     let
       Just uri = parseURI $ "mqtt://127.0.0.1" ++ maybe "" ('#':) mbyID
                   -- the _connID is parsed from the URI on `connectURI`.
       config = mqttConfig
-        { _msgCB = globalMsgCallback handlersRef pendingRef
+        { _msgCB = globalMsgCallback handlersRef pendingRef msgQueue
         , _cleanSession = case mbyID of
               Nothing -> True  -- no persistence, do clean session
               Just _  -> False -- keep msgs the meant for a client which is offline
@@ -342,6 +367,7 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
       , connBaseTopic = serviceTopic
       , connHandlers  = handlersRef
       , connPendingTx = pendingRef
+      , connQueuedMs  = msgQueue
       }
 
   -- must send DISCONNECT before exiting, otherwise LWT triggers
@@ -364,40 +390,82 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
           e -> throwIO e
       ]
 
-  globalMsgCallback handlers pending = SimpleCallback $ \_c topic msg props -> do
-    -- TODO: the default handlers should queue messages we get on connect and
-    -- relay them to the subscribers as they come when using a persistent
-    -- session.
-    hs <- readIORef handlers
-    -- Try all the handlers
-    forM_ (Map.toList hs) $ \(filt, SomeEvtHandler @m handler) ->
-      if | Just ttopic <- txnTopic topic
-         , match filt ttopic
-         , [i]       <- mapMaybe corrData props
-         , Just uuid <- UUID.fromLazyASCIIBytes i
-         , let termin = last (split topic)
-         -> if | "start" <- termin
-               , Just emsg <- decode @(Timed (EvtMsg m)) msg
-               -> do
-                  h_p2 <- handler (EventId uuid ttopic) emsg
-                  pair uuid (emsg.e.rules.timeout*2)
-                          -- expected /finished according to rules.timeout
-                          -- x2 to have bigger window to match a delayed pair
-                          -- (the dashboard may want to display a timed-out but
-                          -- received later /finished)
-                       (PendingStart h_p2)
+  globalMsgCallback handlers pending msgQueue = SimpleCallback $ \_c topic msg props ->
+    if
+      | Just ttopic <- txnTopic topic
+      , [i]         <- mapMaybe corrData props
+      , Just uuid   <- UUID.fromLazyASCIIBytes i
+      , let termin = last (split topic)
+      -> do
 
-               | "finished" <- termin
-               , Just edn <- decode @(Timed EvtDone) msg
-               -> pair uuid 30 -- expect /start very soon after /finished
-                       (PendingFinished edn)
+        let
+          runHandler (SomeEvtHandler @m handler)
+            | "start" <- termin
+            , Just emsg <- decode @(Timed (EvtMsg m)) msg
+            = do
+              h_p2 <- handler (EventId uuid ttopic) emsg
+              pair uuid (emsg.e.rules.timeout*2)
+                      -- expected /finished according to rules.timeout
+                      -- x2 to have bigger window to match a delayed pair
+                      -- (the dashboard may want to display a timed-out but
+                      -- received later /finished)
+                   (PendingStart h_p2)
+              return ()
 
-               | otherwise
-               -> pure ()
+            | "finished" <- termin
+            , Just edn <- decode @(Timed EvtDone) msg
+            = do
+              pair uuid 30 -- expect /start very soon after /finished
+                   (PendingFinished edn)
+              return ()
 
-         | otherwise
-         -> pure ()
+            | otherwise
+            = pure () -- invalid, skip
+
+        -- Atomically ensures a message is only queued if there's
+        -- no matching handler
+        matching_h <- atomically $ do
+          hs <- Map.toList <$> readTVar handlers
+          case filter (\(filt, _) -> match filt ttopic) hs of
+            matching_h:_ -> -- there should be a single matching handler
+              pure (Just matching_h)
+
+            -- When we reconnect on a persistent session, the queued messages
+            -- will be delivered to the global handler straight away. If none
+            -- of the registered handlers match a message we receive[1], then
+            -- we queue them up. We deliver them when The Matching Handler[2] is
+            -- registered with 'react'.
+            --
+            -- ('react' ensures atomically the handler will only run on new
+            -- messages after the pending queue is processed in order, to
+            -- prefer delivering older messages in order despite SimpleCallback
+            -- not guaranteeing order)
+            --
+            -- [1] We only receive messages we are subscribed to, or were
+            -- subscribed to when the persistent session disconnected
+            --
+            -- [2] Recall we don't support overlapping filters, so a topic can
+            -- only match one handler
+            []
+              | SCleanSession <- sd
+              -- This is a clean session, so any messages no current handlers
+              -- match are just ignored. I think it may happen if unsubscribe
+              -- and a broker msg delivery race.
+              -> pure Nothing
+              | SPersistentSession{} <- sd
+              -> do
+                 modifyTVar msgQueue ((ttopic, runHandler):)
+                 pure Nothing
+
+        case matching_h of
+          Just (_, hd) -> runHandler hd
+          Nothing      -> pure ()
+
+      | otherwise
+      -> pure () -- skip, invalid event
+
     where
+
       pair uuid timeout ptxn = do
         atomicModifyIORef' pending (\pm -> case (Map.lookup uuid pm, ptxn) of
           (Nothing, _)
@@ -412,12 +480,10 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
                 -- Remove this pending entry from the map after the timeout.
                 -- If there was already a match, Map.delete uuid will be a no-op.
                 --
-                -- TODO: We should provide a way of handling /finished events
-                -- that arrive after the timeout or on their own. Using react,
-                -- we will lose all events that are finished beyond their
-                -- timeout or across restarts, whereas when the dashboard was
-                -- doing this manually it registered a /finished that arrived
-                -- much later.
+                -- TODO: Should we provide a way of handling /finished events
+                -- that arrive after the timeout or on their own? Using react,
+                -- we will lose all events that are /finished beyond their
+                -- timeout or across restarts
                 _ <- forkIO $ do
                   threadDelay (timeout*1_000_000)
                   modifyPending (Map.delete uuid)
@@ -434,8 +500,8 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
 
       topicsTerm :: [Filter]
       topicsTerm = case sd of
-        SPersistentSession @topics _ _ -> reifyFilters (Proxy @topics)
-        SCleanSession                  -> []
+        SPersistentSession @topics _ _ _ -> reifyFilters (Proxy @topics)
+        SCleanSession                    -> []
 
 isConnUp :: Conn s -> STM Bool
 isConnUp Conn{connClient} = isConnectedSTM connClient
@@ -635,7 +701,7 @@ evtCritical = lens (\s -> s.rules.critical) (\s b -> s{rules = s.rules{critical 
 
 -- | Send a delimited "transactional" event
 event :: (ToJSON m) => Conn s -> Topic -> EvtMsg m -> (EventId -> IO (EvtDone, r)) -> IO r
-event (Conn mc conn_base _ _) topic edt k = do
+event Conn{connClient=mc, connBaseTopic=conn_base} topic edt k = do
   mask $ \restore -> do
     eid <- startEvent
     (dn, r)
@@ -700,7 +766,8 @@ type EvtHandler m a = EventId -> Timed (EvtMsg m) -> IO (Timed EvtDone -> IO a)
 --
 -- For every message that arrives matching this topic, we try to decode it as
 -- an @EvtMsg m@ and pass it to the given handler. If decoding fails, the msg
--- is ignored.
+-- is ignored. The order in which messages arrive is likely the order in which
+-- they were sent, but ordering is not guaranteed.
 --
 -- The return value is an action to unsubscribe and unregister this handler. It
 -- needn't ever be run.
@@ -732,32 +799,55 @@ react :: forall m s. Conn s
       -> IO (IO ())
       -- ^ Returns the action to unsubscribe and unregister this handler for
       -- this topic
-react (Conn mc _conn_base handlersRef _) topic h = sub >> return unsub
+react Conn{connClient=mc, connHandlers, connQueuedMs} topic h = sub >> return unsub
+
   where
     sub = do
-      -- Detect overlapping filters at runtime to throw.
+      -- The registered handler blocks on any new message until its queued
+      -- messages are all processed (the handler may receive messages as soon
+      -- as it's registered, even before `subscribe`, if it's registered while
+      -- queued messages are still arriving)
+      readyForNew <- newTVarIO False
+      let waitReady = atomically (check =<< readTVar readyForNew)
+
+      -- Detect overlapping filters and register handler otherwise, atomically.
       -- See 'overlaps'.
-      bad <- atomicModifyIORef' handlersRef (\m ->
+      bad <- atomically $ do
+        m <- readTVar connHandlers
         let bad = any (overlaps f) (Map.keys m)
-         in (if bad then m else Map.insert f (SomeEvtHandler h) m, bad))
+        when (not bad) $ do
+          writeTVar connHandlers $
+            Map.insert f (SomeEvtHandler (\e t -> waitReady >> h e t)) m
+        pure bad
 
       when bad $
-        Map.keys <$> readIORef handlersRef
+        Map.keys <$> readTVarIO connHandlers
           >>= throwIO . OverlappingFilterException f
 
-      (merrs, _) <- subscribe mc (map (,sub_opts) tfs) []
+      -- The global handler atomically gives the message to a handler OR to the queue.
+      -- After registering the handler, no more messages for this handler can be queued.
+      -- Therefore, we can simply take all matching messages and know we won't miss any.
+      todoMsgs <- atomically $ do
+        msgs <- readTVar connQueuedMs
+        let (matches, rest) = L.partition (match f . fst) msgs
+        writeTVar connQueuedMs rest
+        pure matches
+      forM_ todoMsgs $ \(_t, runHandler) -> runHandler (SomeEvtHandler h)
+      atomically $ writeTVar readyForNew True
+
+      (merrs, _) <- subscribe mc (map (,sub_opts) mqtt_fs) []
       case lefts merrs of
         []   -> pure ()
         errs -> fail (show errs)
 
     unsub = do
-      atomicModifyIORef' handlersRef (\m -> (Map.delete f m, ()))
+      atomically $ modifyTVar connHandlers (Map.delete f)
       hasConn <- isConnected mc
       when hasConn $ do
-        _ <- unsubscribe mc tfs []
+        _ <- unsubscribe mc mqtt_fs []
         pure ()
 
-    tfs
+    mqtt_fs
       | Just (_, "#") <- L.unsnoc (split f)
       = [f] -- already matches .../start and .../finished
       | otherwise

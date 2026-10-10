@@ -117,7 +117,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           () <- event_ c "job" (simple "after") mempty
           seen `logged` [Done "after"]
 
-    , expectFail $ testCase "B11 receives events sent while it was down (regression)" $ persistentTest \ @job base session -> do
+    , testCase "B11 receives events sent while it was down (regression)" $ persistentTest \ @job base session -> do
 
         _ <- try @ErrorCall $ withPersistentConn session base \c -> do
           _ <- react @() c job \_ _ -> pure \_ -> pure ()
@@ -136,7 +136,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           _ <- react c job (logTo seen)
           seen `logged` [Done "offline"] -- expect to receive msg sent while offline
 
-    , expectFail $ testCase "B11b is B11, but with FRESH SessionData" $ persistentTest \ @job base session@(SPersistentSession sid _) -> do
+    , testCase "B11b is B11, but with FRESH SessionData" $ persistentTest \ @job base session@(SPersistentSession sid _ _) -> do
 
         _ <- try @ErrorCall $ withPersistentConn session base \c -> do
           _ <- react @() c job \_ _ -> pure \_ -> pure ()
@@ -183,7 +183,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
             wait sending
             seen `logged` [Done "job"]
 
-    , expectFail $ testCase "B13 just like B12, but finish is delivered while offline" $ persistentTest \ @job base session -> do
+    , testCase "B13 just like B12, but finish is delivered while offline" $ persistentTest \ @job base session -> do
 
         seen <- newLog
         reconnected <- newEmptyMVar
@@ -203,7 +203,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
             _ <- react c job (logTo seen)
             seen `logged` [Done "job"]
 
-    , testCase "B14 just like B12, but brand new SessionData (so they are never paired)" $ persistentTest \ @job base session@(SPersistentSession sid _) -> do
+    , testCase "B14 just like B12, but brand new SessionData (so they are never paired)" $ persistentTest \ @job base session@(SPersistentSession sid _ _) -> do
 
         -- The same test as above but without the same in-memory 'SessionData'.
         -- The /start arrives (and can be saved e.g. by a dashboard), but the
