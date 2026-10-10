@@ -831,7 +831,7 @@ react Conn{connClient=mc, connHandlers, connQueuedMs} topic h = sub >> return un
         msgs <- readTVar connQueuedMs
         let (matches, rest) = L.partition (match f . fst) msgs
         writeTVar connQueuedMs rest
-        pure matches
+        pure (reverse matches) -- process in order they arrived
       forM_ todoMsgs $ \(_t, runHandler) -> runHandler (SomeEvtHandler h)
       atomically $ writeTVar readyForNew True
 
