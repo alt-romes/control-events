@@ -162,6 +162,11 @@ data Conn (session :: SessionType) = Conn
   , connHandlers  :: TVar (Map.Map Filter SomeEvtHandler)
   , connQueuedMs  :: TVar MsgQueue
   , connPendingTx :: IORef PendingMap
+  , connBacklogs  :: TVar [Async ()]
+    -- ^ If connection is closed, wait for backlog threads.
+    -- They may be using Conn resources and because we link the backlogs to
+    -- main thread we want to delimit their execution to the scope of
+    -- `withConn`.
   }
 
 -- | A persistent session must declare upfront all topics it may ever subscribe.
@@ -329,6 +334,7 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
                      SPersistentSession sid _ _ -> Just sid
 
   connectBroker = do
+    connBacklogs <- newTVarIO []
     pendingRef <- case sd of
       SCleanSession             -> newIORef Map.empty
       SPersistentSession _ pr _ -> pure pr
@@ -369,10 +375,12 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
       , connHandlers  = handlersRef
       , connPendingTx = pendingRef
       , connQueuedMs  = msgQueue
+      , connBacklogs
       }
 
   -- must send DISCONNECT before exiting, otherwise LWT triggers
-  disconnectBroker Conn{connClient} =
+  disconnectBroker Conn{connClient, connBacklogs} = do
+    mapM_ wait =<< readTVarIO connBacklogs -- don't leak backlog threads on scope end
     normalDisconnect connClient `catches`
       [ Handler \case
           e :: MQTTException
@@ -800,7 +808,7 @@ react :: forall m s. Conn s
       -> IO (IO ())
       -- ^ Returns the action to unsubscribe and unregister this handler for
       -- this topic
-react Conn{connClient=mc, connHandlers, connQueuedMs} topic h = sub >>= return . unsub
+react Conn{connClient=mc, connHandlers, connQueuedMs, connBacklogs} topic h = sub >>= return . unsub
 
   where
     sub = do
@@ -846,6 +854,8 @@ react Conn{connClient=mc, connHandlers, connQueuedMs} topic h = sub >>= return .
       link backlogThread -- if it throws at any time, async excp is thrown to us
       atomically (writeTVar readyForNew (Just backlogThread))
         -- handler will wait for it to be done before doing more work
+      atomically (modifyTVar connBacklogs (backlogThread:))
+        -- to scope it properly to withConn
 
       (merrs, _) <- subscribe mc (map (,sub_opts) mqtt_fs) []
       case lefts merrs of
