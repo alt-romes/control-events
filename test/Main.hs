@@ -9,7 +9,6 @@ import Control.Monad
 import Data.Either
 import Data.List (sort)
 import Data.Maybe
-import GHC.TypeLits (KnownSymbol)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Network.MQTT.Topic
@@ -25,19 +24,19 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
   [ testGroup "react with a dynamic filter in a clean session"
     [ testCase "B1 reacts to every event sent" $ cleanTest \c base -> do
         seen <- newLog
-        _ <- react' c (base <> "job") (logTo seen)
+        _ <- react c (base <> "job") (logTo seen)
         forM_ ["one", "two", "three"] \l -> event_ c "job" (simple l) \_ -> pure ()
         seen `logged` [Done "one", Done "two", Done "three"]
 
     , testCase "B2 wildcard filter matches subtopics" $ cleanTest \c base -> do
         seen <- newLog
-        _  <- react' c (base <> "#") (logTo seen)
+        _  <- react c (base <> "#") (logTo seen)
         () <- event_ c "a"          (simple "a")   mempty
         () <- event_ c ("b" <> "c") (simple "b/c") mempty
         seen `logged` [Done "a", Done "b/c"]
 
     , testCase "B3 ignores events outside the filter" $ cleanTest \c base -> do
-        (got, ()) <- concurrently (knownFilter (base <> "job") \ @job -> reactOnce c job outcome) do
+        (got, ()) <- concurrently (reactOnce c (base <> "job") outcome) do
           threadDelay 200_000 -- wait sub is active
           () <- event_ c "other" (simple "other") mempty
           () <- event_ c "job"   (simple "job")   mempty
@@ -46,25 +45,25 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
 
     , testCase "B4 reports failed and throwing events as unsuccessful" $ cleanTest \c base -> do
         seen <- newLog
-        _  <- react' c (base <> "job") (logTo seen)
+        _  <- react c (base <> "job") (logTo seen)
         () <- event c "job" (simple "failed") \_ -> pure (failed "nope" ())
         _  <- try @ErrorCall (event_ c "job" (simple "threw") \_ -> throwIO (ErrorCall "boom"))
         seen `logged` [Failed "failed", Failed "threw"]
 
     , testCase "B5 reacting with overlapping filters throws OverlappingFilterException" $ cleanTest \c base -> do
-        _ <- react' @() c (base <> "a") mempty
+        _ <- react @() c (base <> "a") mempty
         r <- try @OverlappingFilterException $
-             react' @() c (base <> "#") mempty
+             react @() c (base <> "#") mempty
         assertBool "expected OverlappingFilterException" (isLeft r)
 
     , testCase "B6 an unsubscribed react no longer runs its handler" $ cleanTest \c base -> do
         seenA   <- newLog
         seenAll <- newLog
 
-        unsubA <- react' c (base <> "a") (logTo seenA)
+        unsubA <- react c (base <> "a") (logTo seenA)
         unsubA -- unsubscribe
 
-        _  <- react' c (base <> "#") (logTo seenAll)
+        _  <- react c (base <> "#") (logTo seenAll)
         () <- event_ c "a" (simple "a") mempty
 
         seenAll `logged` [Done "a"]
@@ -89,19 +88,19 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
         -- unfinished, the messages will be replayed on a persistent
         -- connection and they shouldn't matter on a clean one.
         replicateM_ 10 $ cleanTest \c base -> do
-          _ <- react' @() c (base <> "job") \_ _ -> pure \_ -> pure ()
+          _ <- react @() c (base <> "job") \_ _ -> pure \_ -> pure ()
           forM_ ["one", "two", "three"] \l -> event_ c "job" (simple l) \_ -> pure ()
     ]
 
   , testGroup "persistent session"
-    [ testCase "B9 react to a declared topic" $ persistentTest \ @job base session ->
+    [ testCase "B9 react to a topic in persistent session" $ persistentTest \job base session ->
         withPersistentConn session base \c -> do
           seen <- newLog
           _    <- react c job (logTo seen)
           ()   <- event_ c "job" (simple "job") mempty
           seen `logged` [Done "job"]
 
-    , testCase "B10 reconnects explicitly after going down with an exception" $ persistentTest \ @job base session -> do
+    , testCase "B10 reconnects explicitly after going down with an exception" $ persistentTest \job base session -> do
 
         r <- try @ErrorCall @() $ withPersistentConn session base \c -> do
           seen <- newLog
@@ -117,7 +116,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           () <- event_ c "job" (simple "after") mempty
           seen `logged` [Done "after"]
 
-    , testCase "B11 receives events sent while it was down (regression)" $ persistentTest \ @job base session -> do
+    , testCase "B11 receives events sent while it was down (regression)" $ persistentTest \job base session -> do
 
         _ <- try @ErrorCall $ withPersistentConn session base \c -> do
           _ <- react @() c job \_ _ -> pure \_ -> pure ()
@@ -136,7 +135,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           _ <- react c job (logTo seen)
           seen `logged` [Done "offline"] -- expect to receive msg sent while offline
 
-    , testCase "B11b is B11, but with FRESH SessionData" $ persistentTest \ @job base session@(SPersistentSession sid _ _) -> do
+    , testCase "B11b is B11, but with FRESH SessionData" $ persistentTest \job base session@(SPersistentSession sid _ _) -> do
 
         _ <- try @ErrorCall $ withPersistentConn session base \c -> do
           _ <- react @() c job \_ _ -> pure \_ -> pure ()
@@ -144,7 +143,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
 
         withConn base \c -> event_ c "job" (simple "offline") \_ -> pure ()
 
-        fresh <- newPersistentSession sid [job] -- really new; as if we're re-conn across process restart
+        fresh <- newPersistentSession sid -- really new; as if we're re-conn across process restart
         withPersistentConn fresh base \c -> do
           threadDelay 100_000
           seen <- newLog
@@ -152,7 +151,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           -- expect to receive msg sent while offline, **even with brand new SessionData**
           seen `logged` [Done "offline"]
 
-    , testCase "B12 pairs a start and finish received across a reconnect with same SessionData (regression)" $ persistentTest \ @job base session -> do
+    , testCase "B12 pairs a start and finish received across a reconnect with same SessionData (regression)" $ persistentTest \job base session -> do
 
         -- We do support matching start / finish across reconnects, as long as
         -- the 'SessionData' is re-used.
@@ -183,7 +182,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
             wait sending
             seen `logged` [Done "job"]
 
-    , testCase "B13 just like B12, but finish is delivered while offline" $ persistentTest \ @job base session -> do
+    , testCase "B13 just like B12, but finish is delivered while offline" $ persistentTest \job base session -> do
 
         seen <- newLog
         reconnected <- newEmptyMVar
@@ -203,7 +202,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
             _ <- react c job (logTo seen)
             seen `logged` [Done "job"]
 
-    , testCase "B14 just like B12, but brand new SessionData (so they are never paired)" $ persistentTest \ @job base session@(SPersistentSession sid _ _) -> do
+    , testCase "B14 just like B12, but brand new SessionData (so they are never paired)" $ persistentTest \job base session@(SPersistentSession sid _ _) -> do
 
         -- The same test as above but without the same in-memory 'SessionData'.
         -- The /start arrives (and can be saved e.g. by a dashboard), but the
@@ -222,14 +221,14 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
             seen `loggedStart` "job" -- start is delivered
             pure sending
 
-          fresh <- newPersistentSession sid [job] -- really new; as if we're re-conn across process restart
+          fresh <- newPersistentSession sid -- really new; as if we're re-conn across process restart
           withPersistentConn fresh base \c -> do
             _ <- react c job (logTo seen)
             putMVar reconnected ()
             wait sending
             seen `logged` [] -- we never get `Done` for the "job" after reconnecting (even though we /do/ in the test above)
 
-    , testCase "B15 reactOnce doesn't hang when the broker drops the connection" $ persistentTest \ @job base session -> do
+    , testCase "B15 reactOnce doesn't hang when the broker drops the connection" $ persistentTest \job base session -> do
 
         r <- withPersistentConn session base \c ->
           -- the broker drops a client when another connects with the same id
@@ -240,7 +239,7 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           Left e | isUserError e -> pure ()
           _ -> assertFailure ("expected reactOnce to fail, got: " ++ show r)
 
-    , testCase "B16 closing a connection the broker dropped doesn't throw" $ persistentTest \ @_ base session ->
+    , testCase "B16 closing a connection the broker dropped doesn't throw" $ persistentTest \_ base session ->
         withPersistentConn session base \c -> do
           -- the broker drops a client when another connects with the same id
           withPersistentConn session base \_ -> pure ()
@@ -259,19 +258,18 @@ cleanTest k = do
   withConn base \c -> k c (toFilter base)
 
 -- | A fresh base topic and a fresh persistent session declaring its "job" subtopic.
-persistentTest :: (forall job. KnownSymbol job => Topic -> SessionData (PersistentSession '[job]) -> IO r) -> IO r
+persistentTest :: (Filter -> Topic -> SessionData PersistentSession -> IO r) -> IO r
 persistentTest k = do
   base <- freshTopic
   sid <- UUID.toString <$> UUID.nextRandom
-  knownFilter (toFilter base <> "job") \ @job -> do
-    -- A persistent session that may or may not be shared by the connections
-    -- across a test.
-    --
-    -- We will want persistent tests to check the expected properties (see
-    -- 'withPersistentConn') both when sharing a 'SessionData' and when
-    -- re-connecting from absolute scratch.
-    prs <- newPersistentSession sid [job]
-    k @job base prs
+  -- A persistent session that may or may not be shared by the connections
+  -- across a test.
+  --
+  -- We will want persistent tests to check the expected properties (see
+  -- 'withPersistentConn') both when sharing a 'SessionData' and when
+  -- re-connecting from absolute scratch.
+  prs <- newPersistentSession sid
+  k (toFilter base <> "job") base prs
 
 -- | Use a unique base topic per test
 freshTopic :: IO Topic

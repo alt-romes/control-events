@@ -55,6 +55,5 @@ test-suite control-events-test
     hs-source-dirs:   test
     build-depends:    base, control-events, async, net-mqtt, uuid, stm, tasty, tasty-expected-failure, tasty-hunit
     ghc-options:      -threaded
-    default-extensions: OverloadedStrings, OverloadedRecordDot, BlockArguments,
-                        RequiredTypeArguments, TypeAbstractions
+    default-extensions: OverloadedStrings, OverloadedRecordDot, BlockArguments
     default-language: GHC2024
