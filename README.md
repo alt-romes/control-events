@@ -15,10 +15,3 @@ The nix modules abstract the configuration of a broker for use with
 ## Testing
 
 `cabal test` needs an MQTT broker listening on `127.0.0.1:1883`.
-
-## TODO
-
-- Persistent sessions may drop queued messages on re-connect because the broker
-  delivers them right after re-connecting, before any `react` has dynamically
-  registered. This is the final outstanding task, and not a hard one, just need
-  to get to it! There are a few expected-fail tests for this
