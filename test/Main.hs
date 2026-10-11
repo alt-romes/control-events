@@ -14,7 +14,6 @@ import qualified Data.UUID.V4 as UUID
 import Network.MQTT.Topic
 import System.IO.Error (isUserError)
 import Test.Tasty
-import Test.Tasty.ExpectedFailure
 import Test.Tasty.HUnit
 
 import Control.Events
@@ -244,6 +243,39 @@ main = defaultMain $ localOption (mkTimeout 30_000_000) $ testGroup "control-eve
           -- the broker drops a client when another connects with the same id
           withPersistentConn session base \_ -> pure ()
           atomically (isConnUp c >>= \up -> when up retry)
+
+    , testCase "B17 closing the connection waits for the queued messages to be handled" $ persistentTest \job base session -> do
+        _ <- try @ErrorCall $ withPersistentConn session base \c -> do
+          _ <- react @() c job \_ _ -> pure \_ -> pure ()
+          throwIO (ErrorCall "going down")
+
+        withConn base \c -> event_ c "job" (simple "offline") \_ -> pure ()
+
+        seen@(Log _ finishes) <- newLog
+        withPersistentConn session base \c -> do
+          threadDelay 100_000 -- wait for queued events to arrive
+          _ <- react c job \i m -> threadDelay 300_000 >> logTo seen i m
+          pure () -- exits right after registering react, not when message is processed
+        -- but we'll wait for the ongoing processing of the matching messages
+        -- we've queued on our side before exiting `withPersistentConn`.
+        os <- readTVarIO finishes
+        os @?= [Done "offline"]
+
+    , testCase "B18 unsubscribing waits for the queued messages to be handled" $ persistentTest \job base session -> do
+        _ <- try @ErrorCall $ withPersistentConn session base \c -> do
+          _ <- react @() c job \_ _ -> pure \_ -> pure ()
+          throwIO (ErrorCall "going down")
+
+        withConn base \c -> event_ c "job" (simple "offline") \_ -> pure ()
+
+        seen@(Log _ finishes) <- newLog
+        withPersistentConn session base \c -> do
+          threadDelay 100_000 -- wait for queued events to arrive
+          unsub <- react c job \i m -> threadDelay 300_000 >> logTo seen i m
+          unsub -- before the backlog thread handles "offline"
+          os <- readTVarIO finishes -- unsub will wait for the ongoing
+                                    -- processing of matching queued messages to end
+          os @?= [Done "offline"]
     ]
   ]
 

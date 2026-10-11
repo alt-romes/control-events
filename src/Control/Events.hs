@@ -841,7 +841,7 @@ react Conn{connClient=mc, connHandlers, connQueuedMs, connBacklogs} f h = sub >>
         errs -> cancel backlogThread >> fail (show errs)
 
     unsub backlogThread = do
-      cancel backlogThread
+      wait backlogThread
       atomically $ modifyTVar connHandlers (Map.delete f)
       hasConn <- isConnected mc
       when hasConn $ do
