@@ -118,6 +118,7 @@ import Data.Time.Clock
 import GHC.Generics
 import Control.Concurrent
 import Control.Concurrent.STM
+import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson as JSON
@@ -807,8 +808,15 @@ react Conn{connClient=mc, connHandlers, connQueuedMs} topic h = sub >> return un
       -- messages are all processed (the handler may receive messages as soon
       -- as it's registered, even before `subscribe`, if it's registered while
       -- queued messages are still arriving)
-      readyForNew <- newTVarIO False
-      let waitReady = atomically (check =<< readTVar readyForNew)
+      readyForNew <- newTVarIO Nothing
+      let waitReady = do
+            ra <- atomically do
+              readTVar readyForNew >>= \case
+                Nothing -> retry
+                Just ra -> pure ra
+            wait ra -- ensures exception thrown by backlog queue is raised here too
+                    -- all queued and blocked msgs will be lost and the conn
+                    -- killed if a handler crashes. better bracket!
 
       -- Detect overlapping filters and register handler otherwise, atomically.
       -- See 'overlaps'.
@@ -832,8 +840,13 @@ react Conn{connClient=mc, connHandlers, connQueuedMs} topic h = sub >> return un
         let (matches, rest) = L.partition (match f . fst) msgs
         writeTVar connQueuedMs rest
         pure (reverse matches) -- process in order they arrived
-      forM_ todoMsgs $ \(_t, runHandler) -> runHandler (SomeEvtHandler h)
-      atomically $ writeTVar readyForNew True
+
+      backlogThread <- async do
+        forM_ todoMsgs (\(_t, runHandler) -> runHandler (SomeEvtHandler h))
+
+      link backlogThread -- if it throws, we throw
+      atomically (writeTVar readyForNew (Just backlogThread))
+        -- handler will wait for it to be done before doing more work
 
       (merrs, _) <- subscribe mc (map (,sub_opts) mqtt_fs) []
       case lefts merrs of
