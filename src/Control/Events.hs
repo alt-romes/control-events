@@ -800,7 +800,7 @@ react :: forall m s. Conn s
       -> IO (IO ())
       -- ^ Returns the action to unsubscribe and unregister this handler for
       -- this topic
-react Conn{connClient=mc, connHandlers, connQueuedMs} topic h = sub >> return unsub
+react Conn{connClient=mc, connHandlers, connQueuedMs} topic h = sub >>= return . unsub
 
   where
     sub = do
@@ -844,16 +844,17 @@ react Conn{connClient=mc, connHandlers, connQueuedMs} topic h = sub >> return un
       backlogThread <- async do
         forM_ todoMsgs (\(_t, runHandler) -> runHandler (SomeEvtHandler h))
 
-      link backlogThread -- if it throws, we throw
+      link backlogThread -- if it throws at any time, async excp is thrown to us
       atomically (writeTVar readyForNew (Just backlogThread))
         -- handler will wait for it to be done before doing more work
 
       (merrs, _) <- subscribe mc (map (,sub_opts) mqtt_fs) []
       case lefts merrs of
-        []   -> pure ()
-        errs -> fail (show errs)
+        []   -> pure backlogThread
+        errs -> cancel backlogThread >> fail (show errs)
 
-    unsub = do
+    unsub backlogThread = do
+      cancel backlogThread
       atomically $ modifyTVar connHandlers (Map.delete f)
       hasConn <- isConnected mc
       when hasConn $ do
