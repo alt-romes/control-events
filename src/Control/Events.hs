@@ -809,14 +809,13 @@ react Conn{connClient=mc, connHandlers, connQueuedMs} topic h = sub >>= return .
       -- as it's registered, even before `subscribe`, if it's registered while
       -- queued messages are still arriving)
       readyForNew <- newTVarIO Nothing
-      let waitReady = do
-            ra <- atomically do
-              readTVar readyForNew >>= \case
-                Nothing -> retry
-                Just ra -> pure ra
-            wait ra -- ensures exception thrown by backlog queue is raised here too
-                    -- all queued and blocked msgs will be lost and the conn
-                    -- killed if a handler crashes. better bracket!
+      let waitReady = atomically do
+            readTVar readyForNew >>= \case
+              Nothing -> retry
+              Just ra -> waitSTM ra
+                  -- ensures exception thrown by backlog queue is raised here too
+                  -- all queued and blocked msgs will be lost and the conn
+                  -- killed if a handler crashes. better bracket!
 
       -- Detect overlapping filters and register handler otherwise, atomically.
       -- See 'overlaps'.
