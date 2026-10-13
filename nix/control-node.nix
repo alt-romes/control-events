@@ -121,7 +121,7 @@ in
     };
   };
 
-  flake.nixosModules.control-events = { config, lib, ... }:
+  flake.nixosModules.control-events = { config, lib, pkgs, ... }:
   let cfg = config.services.control-events-node; in
   {
 
@@ -170,10 +170,17 @@ in
           };
         };
 
-        # Persist messages
-        persistence = true;
+        # Persist messages with the sqlite plugin, which commits changes every
+        # few seconds (its flush_period, 5s), rather than the built-in
+        # persistence, as suggested in the manpage.
+        persistence = false; # can't be on with a persistence plugin
+        includeDirs = [
+          (pkgs.writeTextDir "persist-sqlite.conf" ''
+            global_plugin ${pkgs.mosquitto.lib}/lib/mosquitto_persist_sqlite.so
+            plugin_opt_db_file ${config.services.mosquitto.dataDir}/mosquitto.sqlite3
+          '')
+        ];
         settings = {
-          autosave_interval = 300; # save often in case of a crash
           max_queued_messages = 5000; # keep more than the 1000 default
         };
       };
