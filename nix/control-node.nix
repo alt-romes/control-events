@@ -51,6 +51,15 @@ let
       };
     };
   };
+
+  # Mosquitto 2.0.23 fixed "handling of disconnected sessions for
+  # `per_listener_settings true`" which is always true in this config.
+  # This fix is critical because messages for a sleeping machine would get
+  # silently dropped. And, the sqlite persistence plugin needs 2.1.
+  mosquittoAssertion = lib: mosquitto: {
+    assertion = lib.versionAtLeast mosquitto.version "2.1";
+    message = "control-events-node needs mosquitto >= 2.1, but services.mosquitto.package is ${mosquitto.version}.";
+  };
 in
 {
 
@@ -80,6 +89,8 @@ in
     imports = [ nodeOptions ];
     config = lib.mkIf cfg.enable {
       environment.systemPackages = [ cfg.package ];
+
+      assertions = [ (mosquittoAssertion lib mosquitto.package) ];
 
       # launchd chdirs into WorkingDirectory, so it must already exist
       system.activationScripts.preActivation.text = ''
@@ -130,6 +141,8 @@ in
     config = lib.mkIf cfg.enable {
       environment.systemPackages = [ cfg.package ];
 
+      assertions = [ (mosquittoAssertion lib config.services.mosquitto.package) ];
+
       services.mosquitto = {
         enable = true;
 
@@ -176,7 +189,7 @@ in
         persistence = false; # can't be on with a persistence plugin
         includeDirs = [
           (pkgs.writeTextDir "persist-sqlite.conf" ''
-            global_plugin ${pkgs.mosquitto.lib}/lib/mosquitto_persist_sqlite.so
+            global_plugin ${config.services.mosquitto.package.lib}/lib/mosquitto_persist_sqlite.so
             plugin_opt_db_file ${config.services.mosquitto.dataDir}/mosquitto.sqlite3
           '')
         ];
