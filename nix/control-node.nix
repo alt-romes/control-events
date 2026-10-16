@@ -3,7 +3,9 @@ let
   nodeOptions = { lib, pkgs, ... }: {
     options = {
       services.control-events-node = {
+
         enable = lib.mkEnableOption "a control-events-node on this machine, which listens for control-events";
+
         proxyTo = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
@@ -15,6 +17,7 @@ let
                 the potentially remote target is unavailable).
             '';
         };
+
         listenOn = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
@@ -27,14 +30,16 @@ let
                  rather than any TLS or password based authentication to the node.
                  '';
         };
+
         nodeId = lib.mkOption {
-          type = lib.types.nullOr lib.types.str;
-          default = null;
+          type = lib.types.str;
           description = ''
             String node identifier which must be unique across nodes
-            proxying to the same target. Required if proxyTo is not null.
+            proxying to the same target. It's also the name under which
+            system-healthcheck pings.
             '';
         };
+
         bridge2 = lib.mkOption {
           type = lib.types.bool;
           default = false;
@@ -43,11 +48,15 @@ let
             back into this node.
             '';
         };
+
+        system-healthcheck = lib.mkEnableOption "Enable a periodic system/<name> event with some system stats to observe load.";
+
         package = lib.mkOption {
           type = lib.types.package;
           default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
           description = "The control-events package to use and install.";
         };
+
       };
     };
   };
@@ -60,6 +69,31 @@ let
     assertion = lib.versionAtLeast mosquitto.version "2.1";
     message = "control-events-node needs mosquitto >= 2.1, but services.mosquitto.package is ${mosquitto.version}.";
   };
+
+  # Send a system/<name> event with load stats to the local broker
+  healthcheckLoop = pkgs: mosquitto: name: pkgs.writeShellScript "control-events-system-healthcheck" ''
+    export PATH=${pkgs.lib.makeBinPath [ mosquitto pkgs.libstatgrab pkgs.coreutils ]}:/usr/bin:$PATH
+    NAME=${pkgs.lib.escapeShellArg name}
+
+    pub() {
+      mosquitto_pub -h 127.0.0.1 -V mqttv5 -q 2 \
+        -D publish correlation-data "$ID" \
+        -t "system/$NAME/$1" \
+        -m "{\"at\":\"$(date -u +%FT%TZ)\",\"e\":$2}"
+    }
+
+    while true; do
+      ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
+      load=$(( $(statgrab -u -f 100 load.min5) / $(statgrab -u general.ncpus) )) # % of cores
+      mem=$(( ($(statgrab -u mem.free) + $(statgrab -u mem.cache)) * 100 / $(statgrab -u mem.total) ))
+      disk=$(df --output=pcent / | tail -1 | tr -d ' ')
+      stats="{\"loadPct\":$load,\"memAvailPct\":$mem,\"diskUsed\":\"$disk\"}"
+
+      pub start "{\"label\":\"$NAME\",\"rules\":{\"timeout\":60,\"expected\":300,\"critical\":false},\"content\":$stats}" &&
+      pub finished '{"summary":"","success":true}'
+      sleep 300
+    done
+  '';
 in
 {
 
@@ -127,6 +161,14 @@ in
           WorkingDirectory = mosquitto.dataDir;
           StandardOutPath = "/tmp/nix.services.mosquitto.out";
           StandardErrorPath = "/tmp/nix.services.mosquitto.err";
+        };
+      };
+
+      launchd.daemons.control-events-system-healthcheck = lib.mkIf cfg.system-healthcheck {
+        serviceConfig = {
+          ProgramArguments = [ "${healthcheckLoop pkgs mosquitto.package cfg.nodeId}" ];
+          RunAtLoad = true;
+          KeepAlive = true;
         };
       };
     };
@@ -203,6 +245,17 @@ in
         # bound on private addr in `listenOn` (1883 is the default port)
         # WARNING: If you add a listener above with a public IP, anyone can use the broker.
         allowedTCPPorts = [ 1883 ];
+      };
+
+      systemd.services.control-events-system-healthcheck = lib.mkIf cfg.system-healthcheck {
+        description = "Send control-events system healthchecks";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "mosquitto.service" ];
+        serviceConfig = {
+          ExecStart = healthcheckLoop pkgs config.services.mosquitto.package cfg.nodeId;
+          Restart = "always";
+          DynamicUser = true;
+        };
       };
 
      };
