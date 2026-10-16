@@ -496,6 +496,9 @@ isConnUp Conn{connClient} = isConnectedSTM connClient
 -- * Messages
 --------------------------------------------------------------------------------
 
+json_opts :: Options
+json_opts = defaultOptions{omitNothingFields = True}
+
 -- | An identifier to correlate scoped events and start/stop events
 data EventId = EventId { correlationId :: UUID.UUID, evtTopic :: Topic }
   deriving stock Generic
@@ -529,7 +532,10 @@ data EvtMsg m = EvtMsg
     -- this event
   }
   deriving stock Generic
-  deriving anyclass (ToJSON, FromJSON)
+  deriving anyclass FromJSON
+
+instance ToJSON m => ToJSON (EvtMsg m) where toJSON     = genericToJSON json_opts
+                                             toEncoding = genericToEncoding json_opts
 
 simple :: String -> EvtMsg ()
 simple x = EvtMsg
@@ -540,7 +546,7 @@ simple x = EvtMsg
     , expected = Nothing
     , subtasks = Nothing
     , reactions = Nothing
-    , critical = False
+    , critical = Nothing
     }
   , label    = x
   , content  = Nothing
@@ -586,7 +592,10 @@ data EvtDone = EvtDone
     -- rules engine/dashboard.
   }
   deriving stock Generic
-  deriving anyclass (ToJSON, FromJSON)
+  deriving anyclass FromJSON
+
+instance ToJSON EvtDone where toJSON     = genericToJSON json_opts
+                              toEncoding = genericToEncoding json_opts
 
 -- | A specification for a *trigger* event. A *trigger* event is a normal
 -- event, still sent using the 'event' combinator (typically published on
@@ -658,12 +667,15 @@ data Rules = Rules
     -- this event per entry on the list. These "reply" events must have a
     -- @react@ field matching this event's correlation-id. Each @Filter@ must
     -- @'match'@ the topic the reply is sent under.
-  , critical :: Bool
+  , critical :: Maybe Bool
     -- ^ A rule validation engine must warn critically (CRITICAL FAILURE) if
-    -- any of the rules are violated when @critical = True@
+    -- any of the rules are violated when @critical = True@. @Nothing@ means @False@.
   }
   deriving stock Generic
-  deriving anyclass (ToJSON, FromJSON)
+  deriving anyclass FromJSON
+
+instance ToJSON Rules where toJSON     = genericToJSON json_opts
+                            toEncoding = genericToEncoding json_opts
 
 evtTimeout :: Lens' (EvtMsg m) Int
 evtTimeout = lens (\s -> s.rules.timeout) (\s b -> s{rules = s.rules{timeout = b}})
@@ -678,7 +690,7 @@ evtReactions :: Lens' (EvtMsg m) (Maybe [Filter])
 evtReactions = lens (\s -> s.rules.reactions) (\s b -> s{rules = s.rules{reactions = b}})
 
 evtCritical :: Lens' (EvtMsg m) Bool
-evtCritical = lens (\s -> s.rules.critical) (\s b -> s{rules = s.rules{critical = b}})
+evtCritical = lens (\s -> s.rules.critical == Just True) (\s b -> s{rules = s.rules{critical = if b then Just True else Nothing}})
 
 
 --------------------------------------------------------------------------------
