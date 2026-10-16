@@ -52,7 +52,7 @@ let
         system-healthcheck = lib.mkEnableOption "Enable a periodic system/<name> event with some system stats to observe load.";
 
         package = lib.mkOption {
-          type = lib.types.package;
+          type = lib.types.nullOr lib.types.package;
           default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
           description = "The control-events package to use and install.";
         };
@@ -122,7 +122,7 @@ in
   {
     imports = [ nodeOptions ];
     config = lib.mkIf cfg.enable {
-      environment.systemPackages = [ cfg.package ];
+      environment.systemPackages = lib.optional (cfg.package != null) cfg.package;
 
       assertions = [ (mosquittoAssertion lib mosquitto.package) ];
 
@@ -181,7 +181,7 @@ in
     imports = [ nodeOptions ];
 
     config = lib.mkIf cfg.enable {
-      environment.systemPackages = [ cfg.package ];
+      environment.systemPackages = lib.optional (cfg.package != null) cfg.package;
 
       assertions = [ (mosquittoAssertion lib config.services.mosquitto.package) ];
 
