@@ -81,7 +81,7 @@ module Control.Events
 
   , EventId(..), Timed(..)
   , EvtMsg(..), simple
-  , scoped, reacted, withMsg
+  , scoped, reacted, reactedMany, withMsg
 
   , EvtDone(..), Trigger(..)
   , done, failed
@@ -512,9 +512,10 @@ data EvtMsg m = EvtMsg
   { scope    :: Maybe EventId
     -- ^ If this event should be correlated with an 'event' run whose scope
     -- captures this one.
-  , reactTo  :: Maybe EventId
+  , reactTo  :: Maybe [EventId]
     -- ^ If specified, the 'EventId' identifies the event that this one is
-    -- reacting to.
+    -- reacting to. There may be more than one if an event comes as a reaction
+    -- only after many specific events happening.
     --
     -- A process may subscribe to any event (@trigger/...@ or otherwise) to do
     -- work in reaction to that event having happened. This field lets us
@@ -556,7 +557,10 @@ scoped :: Lens' (EvtMsg m) (Maybe EventId)
 scoped = lens (\s -> s.scope) (\s b -> s{scope = b})
 
 reacted :: Lens' (EvtMsg m) (Maybe EventId)
-reacted = lens (\s -> s.reactTo) (\s b -> s{reactTo = b})
+reacted = lens (\s -> s.reactTo >>= listToMaybe) (\s b -> s{reactTo = (:[]) <$> b})
+
+reactedMany :: Lens' (EvtMsg m) (Maybe [EventId])
+reactedMany = lens (\s -> s.reactTo) (\s b -> s{reactTo = b})
 
 withMsg :: Lens (EvtMsg m) (EvtMsg n) (Maybe m) (Maybe n)
 withMsg = lens (\s -> s.content) (\s b -> s{content = b})
