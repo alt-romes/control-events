@@ -511,7 +511,8 @@ data Timed a = Timed { at :: UTCTime, e :: a }
 data EvtMsg m = EvtMsg
   { scope    :: Maybe EventId
     -- ^ If this event should be correlated with an 'event' run whose scope
-    -- captures this one.
+    -- captures this one. If @Just evt@, the topic of the scope parent event
+    -- will be used as the base topic for this message's event.
   , reactTo  :: Maybe [EventId]
     -- ^ If specified, the 'EventId' identifies the event that this one is
     -- reacting to. There may be more than one if an event comes as a reaction
