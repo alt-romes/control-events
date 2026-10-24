@@ -3,7 +3,9 @@ module Main (main) where
 
 import Control.Concurrent
 import Data.Maybe (fromMaybe)
+import Data.Aeson (Value, eitherDecodeStrict)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import Options.Applicative
 import System.Exit
 import System.Process
@@ -17,6 +19,7 @@ data Opts = Opts
   , timeout  :: Maybe Int
   , critical :: Bool
   , label    :: Maybe String
+  , content  :: Maybe Value
   , topic    :: Topic
   , exe      :: FilePath
   , args     :: [String]
@@ -27,7 +30,9 @@ opts = Opts
   <$> optional (option auto (long "expected" <> metavar "SECS" <> help "The next run is expected within this many seconds"))
   <*> optional (option auto (long "timeout" <> metavar "SECS" <> help "The run must finish within this many seconds"))
   <*> switch (long "critical" <> help "Any problem with a run is a critical failure")
-  <*> optional (strOption (long "label" <> metavar "LABEL" <> help "What the run is (default: the topic)"))
+  <*> optional (strOption (long "label" <> metavar "LABEL" <> help "The run event label"))
+  <*> optional (option (eitherReader (eitherDecodeStrict . T.encodeUtf8 . T.pack))
+                       (long "content" <> metavar "JSON" <> help "Additional content to announce with the run, e.g. the address a server serves"))
   <*> argument (maybeReader (mkTopic . T.pack)) (metavar "TOPIC")
   <*> strArgument (metavar "EXE")
   <*> many (strArgument (metavar "ARGS..."))
@@ -37,7 +42,7 @@ data Command = Script Opts | Healthcheck Opts
 cmds :: Parser Command
 cmds = hsubparser
   (  cmd "script" Script "Send an event for the program's run"
-  <> cmd "healthcheck" Healthcheck "Send a healthcheck event every --expected seconds (default 60) while the program runs" )
+  <> cmd "healthcheck" Healthcheck "Send a healthcheck event every --expected seconds (default 300) while the program runs" )
   where
     cmd n f d = command n (info (f <$> opts) (progDesc d))
 
@@ -46,8 +51,9 @@ main = execParser (info (cmds <**> helper) (progDesc "Run a program, sending con
   Script o      -> runScript o
   Healthcheck o -> runHealthcheck o
 
-msgOf :: Opts -> EvtMsg ()
-msgOf o = simple (fromMaybe (T.unpack (unTopic o.topic)) o.label)
+msgOf :: Opts -> EvtMsg Value
+msgOf o = simple (fromMaybe "" o.label)
+  & withMsg .~ o.content
   & evtExpected .~ (fromInteger <$> o.expected)
   & evtTimeout %~ (\t -> fromMaybe t o.timeout)
   & evtCritical .~ o.critical

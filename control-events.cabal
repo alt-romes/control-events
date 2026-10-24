@@ -41,7 +41,8 @@ executable control-events
         net-mqtt,
         optparse-applicative,
         time,
-        text
+        text,
+        aeson
 
     ghc-options: -threaded
     hs-source-dirs:   app
