@@ -71,26 +71,19 @@ let
   };
 
   # Send a system/<name> event with load stats to the local broker
-  healthcheckLoop = pkgs: mosquitto: name: pkgs.writeShellScript "control-events-system-healthcheck" ''
-    export PATH=${pkgs.lib.makeBinPath [ mosquitto pkgs.libstatgrab pkgs.coreutils ]}:/usr/bin:$PATH
+  systemHealthLoop = pkgs: mosquitto: name:
+  let micro = self.packages.${pkgs.stdenv.hostPlatform.system}.micro-control-events.override { inherit mosquitto; }; in
+  pkgs.writeShellScript "control-events-system-healthcheck" ''
+    export PATH=${pkgs.lib.makeBinPath [ micro pkgs.libstatgrab pkgs.coreutils ]}:/usr/bin:$PATH
     NAME=${pkgs.lib.escapeShellArg name}
 
-    pub() {
-      mosquitto_pub -h 127.0.0.1 -V mqttv5 -q 2 \
-        -D publish correlation-data "$ID" \
-        -t "system/$NAME/$1" \
-        -m "{\"at\":\"$(date -u +%FT%TZ)\",\"e\":$2}"
-    }
-
     while true; do
-      ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
       load=$(( $(statgrab -u -f 100 load.min5) / $(statgrab -u general.ncpus) )) # % of cores
       mem=$(( ($(statgrab -u mem.free) + $(statgrab -u mem.cache)) * 100 / $(statgrab -u mem.total) ))
       disk=$(df --output=pcent / | tail -1 | tr -d ' ')
       stats="{\"loadPct\":$load,\"memAvailPct\":$mem,\"diskUsed\":\"$disk\"}"
 
-      pub start "{\"label\":\"$NAME\",\"rules\":{\"timeout\":60,\"expected\":300,\"critical\":false},\"content\":$stats}" &&
-      pub finished '{"summary":"","success":true}'
+      TOPIC="system/$NAME" LABEL="$NAME" TIMEOUT=60 EXPECTED=300 CONTENT="$stats" micro-control-events true
       sleep 300
     done
   '';
@@ -166,7 +159,7 @@ in
 
       launchd.daemons.control-events-system-healthcheck = lib.mkIf cfg.system-healthcheck {
         serviceConfig = {
-          ProgramArguments = [ "${healthcheckLoop pkgs mosquitto.package cfg.nodeId}" ];
+          ProgramArguments = [ "${systemHealthLoop pkgs mosquitto.package cfg.nodeId}" ];
           RunAtLoad = true;
           KeepAlive = true;
         };
@@ -252,7 +245,7 @@ in
         wantedBy = [ "multi-user.target" ];
         after = [ "mosquitto.service" ];
         serviceConfig = {
-          ExecStart = healthcheckLoop pkgs config.services.mosquitto.package cfg.nodeId;
+          ExecStart = systemHealthLoop pkgs config.services.mosquitto.package cfg.nodeId;
           Restart = "always";
           DynamicUser = true;
         };
