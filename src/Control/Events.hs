@@ -343,9 +343,9 @@ withPersistentConn sd serviceTopic = bracket connectBroker disconnectBroker wher
             , _willProps = []
             }
         , _connProps =
-            [ -- 1 day, required property for messages to be kept persisted
+            [ -- 7 days, required property for messages to be kept persisted
               -- if not persistent, expire 0 means nothing is kept.
-              PropSessionExpiryInterval (maybe 0 (const 86400) mbyID)
+              PropSessionExpiryInterval (maybe 0 (const (86400*7)) mbyID)
             ]
         , _protocol = Protocol50
         , _connID   = fromMaybe "" mbyID -- is always overwritten by the #<id> in the URI.

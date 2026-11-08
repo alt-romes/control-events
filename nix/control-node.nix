@@ -211,7 +211,7 @@ in
               cleansession = false;
               # 0 (default) would make the session expire immediately when the
               # connection drops, rather than queueing messages
-              bridge_session_expiry_interval = 86400*5; # 5 days
+              bridge_session_expiry_interval = 86400*7; # 7 days
               remote_clientid = cfg.nodeId;
               bridge_protocol_version = "mqttv50";
             };
@@ -229,7 +229,7 @@ in
           '')
         ];
         settings = {
-          max_queued_messages = 5000; # keep more than the 1000 default
+          max_queued_messages = 20000; # ~7 days of healthchecks from a few nodes
         };
       };
 
