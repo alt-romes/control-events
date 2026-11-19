@@ -158,8 +158,8 @@ in
       };
 
       launchd.daemons.control-events-system-healthcheck = lib.mkIf cfg.system-healthcheck {
+        command = "${systemHealthLoop pkgs mosquitto.package cfg.nodeId}";
         serviceConfig = {
-          ProgramArguments = [ "${systemHealthLoop pkgs mosquitto.package cfg.nodeId}" ];
           RunAtLoad = true;
           KeepAlive = true;
         };
